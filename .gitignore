@@ -1,0 +1,49 @@
+# ==============================================================================
+# Accsify WebStack - Git Ignore configuration
+# Copyright (c) 2026 Accsify. All rights reserved.
+# ==============================================================================
+
+# Ignore downloaded stack components
+/apache24/
+/mysql/
+/php/
+/phpmyadmin/
+/composer.phar
+
+# Ignore downloaded zip packages and installer executables
+/*.zip
+/*.exe
+/vc_redist.x64.exe
+
+# Ignore local web projects under www but keep the core index dashboard
+/www/*
+!/www/index.php
+
+# Ignore project-level dependencies and build outputs
+**/node_modules/
+**/bower_components/
+**/dist/
+**/.svelte-kit/
+**/.next/
+**/.nuxt/
+
+# Ignore sensitive environment variables and credentials
+**/.env
+**/.env.local
+**/.env.development.local
+**/.env.test.local
+**/.env.production.local
+**/*.env.[a-zA-Z]*
+
+# Ignore database engines local files
+**/database.sqlite
+**/*.db
+**/*.sql
+**/*.log
+
+# Ignore IDE configurations and system trash
+**/.idea/
+**/.vscode/
+**/.DS_Store
+Thumbs.db
+desktop.ini
