@@ -223,6 +223,26 @@ function Flatten-Subfolder {
     }
 }
 
+# --- PHP CONFIG OPTIMIZER ---
+
+function Optimize-PHPConfiguration {
+    $phpIni = "$BaseDir\php\php.ini"
+    if (Test-Path $phpIni) {
+        $content = Get-Content $phpIni -Raw
+        
+        $needsUpdate = $false
+        if ($content -notmatch '(?m)^error_reporting\s*=\s*E_ALL\s*&\s*~E_DEPRECATED\s*&\s*~E_STRICT') {
+            $content = $content -replace '(?m)^[ \t]*;?error_reporting\s*=\s*.*$', 'error_reporting = E_ALL & ~E_DEPRECATED & ~E_STRICT'
+            $needsUpdate = $true
+        }
+        
+        if ($needsUpdate) {
+            $content | Set-Content $phpIni -Force
+            Write-Host "[+] PHP php.ini error reporting optimized to suppress deprecation notices." -ForegroundColor Green
+        }
+    }
+}
+
 # --- DATABASE HELPER ---
 
 function Create-Database {
@@ -238,19 +258,21 @@ function Create-Database {
         return $false
     }
     
-    $sqlCmd = "CREATE DATABASE IF NOT EXISTS \`$dbName\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+    $sqlCmd = "CREATE DATABASE IF NOT EXISTS ``$dbName`` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
     
-    try {
-        if ([string]::IsNullOrEmpty($password)) {
-            & $mysqlExe -u root -P $port -h 127.0.0.1 -e $sqlCmd 2>&1 | Out-Null
-        } else {
-            & $mysqlExe -u root -p$password -P $port -h 127.0.0.1 -e $sqlCmd 2>&1 | Out-Null
-        }
+    $output = $null
+    if ([string]::IsNullOrEmpty($password)) {
+        $output = & $mysqlExe -u root -P $port -h 127.0.0.1 -e $sqlCmd 2>&1
+    } else {
+        $output = & $mysqlExe -u root "-p$password" -P $port -h 127.0.0.1 -e $sqlCmd 2>&1
+    }
+    
+    if ($LASTEXITCODE -eq 0) {
         Write-Host "[+] Database '$dbName' created or verified successfully." -ForegroundColor Green
         return $true
-    } catch {
-        Write-Host "[!] Warning: Failed to connect to MySQL database to create '$dbName'. Make sure MySQL is running." -ForegroundColor Red
-        Write-Host "Error Details: $_" -ForegroundColor DarkGray
+    } else {
+        Write-Host "[!] Error: Failed to connect or create MySQL database '$dbName'. Make sure MySQL is running." -ForegroundColor Red
+        Write-Host "MySQL Output/Error details: $output" -ForegroundColor DarkGray
         return $false
     }
 }
@@ -285,22 +307,28 @@ function Configure-WordPress {
     
     $content = Get-Content $sampleConfig -Raw
     
-    # Replace DB credentials
-    $content = $content -replace "database_name_here", $dbName
-    $content = $content -replace "username_here", $dbUser
-    $content = $content -replace "password_here", $dbPassword
-    $content = $content -replace "localhost", $dbHost
+    # Escape DB credentials for single-quoted PHP strings
+    $escDbName = $dbName.Replace('\', '\\').Replace("'", "\'")
+    $escDbUser = $dbUser.Replace('\', '\\').Replace("'", "\'")
+    $escDbPassword = $dbPassword.Replace('\', '\\').Replace("'", "\'")
+    $escDbHost = $dbHost.Replace('\', '\\').Replace("'", "\'")
+    
+    # Replace DB credentials literally
+    $content = $content.Replace("database_name_here", $escDbName)
+    $content = $content.Replace("username_here", $escDbUser)
+    $content = $content.Replace("password_here", $escDbPassword)
+    $content = $content.Replace("localhost", $escDbHost)
     
     # Replace salts
     if ($salts) {
         $pattern = '(?s)define\(\s*''AUTH_KEY''.*?define\(\s*''NONCE_SALT''.*?\);\s*'
-        $content = $content -replace $pattern, $salts
+        $content = $content -replace $pattern, $salts.Replace('$', '$$')
     } else {
         $chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()-_ []{}<>~`+=,.;:/?|"
         $keys = @('AUTH_KEY', 'SECURE_AUTH_KEY', 'LOGGED_IN_KEY', 'NONCE_KEY', 'AUTH_SALT', 'SECURE_AUTH_SALT', 'LOGGED_IN_SALT', 'NONCE_SALT')
         foreach ($key in $keys) {
             $randSalt = -join ((1..64) | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
-            $randSaltEscaped = $randSalt.Replace('\', '\\').Replace("'", "\'")
+            $randSaltEscaped = $randSalt.Replace('\', '\\').Replace("'", "\'").Replace('$', '$$')
             $content = $content -replace "define\(\s*'$key',\s*'put your unique phrase here'\s*\);", "define('$key', '$randSaltEscaped');"
         }
     }
@@ -333,13 +361,20 @@ function Configure-Laravel {
     
     $content = Get-Content $envPath -Raw
     
+    # Escape credentials for regex replacement
+    $escDbHost = $dbHost.Replace('$', '$$')
+    $escDbPort = $dbPort.Replace('$', '$$')
+    $escDbName = $dbName.Replace('$', '$$')
+    $escDbUser = $dbUser.Replace('$', '$$')
+    $escDbPassword = $dbPassword.Replace('$', '$$')
+    
     # Replace DB configurations (supports commented-out lines in newer Laravel versions)
     $content = $content -replace '(?m)^#?\s*DB_CONNECTION=.*$', "DB_CONNECTION=mysql"
-    $content = $content -replace '(?m)^#?\s*DB_HOST=.*$', "DB_HOST=$dbHost"
-    $content = $content -replace '(?m)^#?\s*DB_PORT=.*$', "DB_PORT=$dbPort"
-    $content = $content -replace '(?m)^#?\s*DB_DATABASE=.*$', "DB_DATABASE=$dbName"
-    $content = $content -replace '(?m)^#?\s*DB_USERNAME=.*$', "DB_USERNAME=$dbUser"
-    $content = $content -replace '(?m)^#?\s*DB_PASSWORD=.*$', "DB_PASSWORD=$dbPassword"
+    $content = $content -replace '(?m)^#?\s*DB_HOST=.*$', "DB_HOST=$escDbHost"
+    $content = $content -replace '(?m)^#?\s*DB_PORT=.*$', "DB_PORT=$escDbPort"
+    $content = $content -replace '(?m)^#?\s*DB_DATABASE=.*$', "DB_DATABASE=$escDbName"
+    $content = $content -replace '(?m)^#?\s*DB_USERNAME=.*$', "DB_USERNAME=$escDbUser"
+    $content = $content -replace '(?m)^#?\s*DB_PASSWORD=.*$', "DB_PASSWORD=$escDbPassword"
     
     $content | Set-Content $envPath -Force
     Write-Host "[+] Laravel .env file updated." -ForegroundColor Green
@@ -347,11 +382,18 @@ function Configure-Laravel {
     Write-Host "Generating Laravel application key..." -ForegroundColor Yellow
     $phpExe = "$BaseDir\php\php.exe"
     if (Test-Path $phpExe) {
-        $proc = Start-Process -FilePath $phpExe -ArgumentList "artisan key:generate" -WorkingDirectory $path -NoNewWindow -PassThru -Wait
-        if ($proc.ExitCode -eq 0) {
-            Write-Host "[+] Application key generated successfully." -ForegroundColor Green
-        } else {
-            Write-Host "[-] Warning: Failed to generate Application key via Artisan." -ForegroundColor Red
+        Push-Location $path
+        try {
+            & $phpExe artisan key:generate --force
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "[+] Application key generated successfully." -ForegroundColor Green
+            } else {
+                Write-Host "[-] Warning: Failed to generate Application key via Artisan. Exit code: $LASTEXITCODE" -ForegroundColor Red
+            }
+        } catch {
+            Write-Host "[-] Warning: Failed to execute artisan key:generate. $_" -ForegroundColor Red
+        } finally {
+            Pop-Location
         }
     }
 }
@@ -372,14 +414,21 @@ function Configure-XenForo {
     }
     $configPath = Join-Path $srcDir "config.php"
     
+    # Escape for single-quoted PHP strings
+    $phpDbHost = $dbHost.Replace('\', '\\').Replace("'", "\'")
+    $phpDbPort = $dbPort.Replace('\', '\\').Replace("'", "\'")
+    $phpDbUser = $dbUser.Replace('\', '\\').Replace("'", "\'")
+    $phpDbPassword = $dbPassword.Replace('\', '\\').Replace("'", "\'")
+    $phpDbName = $dbName.Replace('\', '\\').Replace("'", "\'")
+    
     $configContent = @"
 <?php
 
-`$config['db']['host'] = '$dbHost';
-`$config['db']['port'] = '$dbPort';
-`$config['db']['username'] = '$dbUser';
-`$config['db']['password'] = '$dbPassword';
-`$config['db']['dbname'] = '$dbName';
+`$config['db']['host'] = '$phpDbHost';
+`$config['db']['port'] = '$phpDbPort';
+`$config['db']['username'] = '$phpDbUser';
+`$config['db']['password'] = '$phpDbPassword';
+`$config['db']['dbname'] = '$phpDbName';
 
 `$config['fullUnicode'] = true;
 "@
@@ -409,7 +458,7 @@ function Get-InstallationPath {
         $wwwPath = [System.IO.Path]::GetFullPath("$BaseDir\www")
         
         # Directory traversal prevention check
-        if (-not $resolvedPath.StartsWith($wwwPath)) {
+        if (-not $resolvedPath.StartsWith($wwwPath, [System.StringComparison]::OrdinalIgnoreCase)) {
             Write-Host "[!] Security Warning: Installation must remain inside the www folder!" -ForegroundColor Red
             continue
         }
@@ -435,10 +484,13 @@ function Get-InstallationPath {
 function Start-Installer {
     if (-not (Verify-StackInstalled)) { return }
     
+    # Run PHP optimization on start to suppress deprecations
+    Optimize-PHPConfiguration
+    
     $ports = Get-Ports
     $tempDir = "$BaseDir\temp_installer"
     
-    while ($true) {
+    :MainLoop while ($true) {
         Clear-Host
         Write-Host "====================================================================" -ForegroundColor Cyan
         Write-Host " OFFLINE PORTABLE WAMP - PROFESSIONAL SCRIPTS INSTALLER" -ForegroundColor Cyan
@@ -446,14 +498,14 @@ function Start-Installer {
         Write-Host " Select a script/framework to download and configure:"
         Write-Host "--------------------------------------------------------------------"
         Write-Host " 1. WordPress (Latest release)"
-        Write-Host " 2. Joomla (Joomla 5.x stable package)"
+        Write-Host " 2. Joomla (Joomla 5.2.2 stable package)"
         Write-Host " 3. Laravel Framework (Automated project setup via Composer)"
         Write-Host " 4. XenForo Forums (Requires your own local xenforo.zip package)"
-        Write-Host " 5. Drupal CMS (Latest Drupal stable release)"
+        Write-Host " 5. Drupal CMS (Drupal 10.3.0 stable release)"
         Write-Host " 6. React.js App (Fast setup via Vite + NPM)"
         Write-Host " 7. Next.js App (Production-ready via create-next-app + Tailwind)"
         Write-Host " 8. Vue.js App (Fast setup via Vite + NPM)"
-        Write-Host " 9. PrestaShop (E-commerce platform)"
+        Write-Host " 9. PrestaShop (PrestaShop 8.1.7 stable)"
         Write-Host " 10. Exit"
         Write-Host "====================================================================" -ForegroundColor Cyan
         
@@ -468,7 +520,7 @@ function Start-Installer {
             break
         }
         
-        if ($choice -notmatch "^[1-9]$") {
+        if ($choice -notmatch "^(?:[1-9]|10)$") {
             Write-Host "[!] Invalid option. Choose 1-10." -ForegroundColor Red
             Start-Sleep -Seconds 2
             continue
@@ -479,40 +531,58 @@ function Start-Installer {
         $targetPath = $folderInfo.Path
         $relFolder = $folderInfo.RelFolder
         
-        # Database Creation prompt (only for PHP/CMS scripts: WordPress, Joomla, Laravel, Xenforo, Drupal, PrestaShop)
+        # Database setup prompts (only for PHP/CMS scripts: WordPress, Joomla, Laravel, Xenforo, Drupal, PrestaShop)
         $isNodeApp = $choice -match "^[6-8]$"
+        $configureDb = "N"
         $createDb = "N"
         $dbName = ""
-        $mysqlPassword = "root"
+        $dbUser = "root"
+        $dbPassword = "root"
+        $installDeps = "Y"
         
         if (-not $isNodeApp) {
-            $createDb = Read-Host "Do you want to automatically create a MySQL database? (Y/N)"
-            if ($createDb.Trim().ToUpper() -eq "Y") {
-                while ($true) {
-                    $defaultDbName = "db_" + ($relFolder -replace '[^a-zA-Z0-9]', '_').Trim('_')
-                    Write-Host "Enter database name [default: $defaultDbName]:"
-                    $dbNameInput = Read-Host "DB Name"
-                    $dbName = if ([string]::IsNullOrEmpty($dbNameInput)) { $defaultDbName } else { $dbNameInput.Trim() }
-                    
-                    Write-Host "Enter MySQL root password [default: root]:"
-                    $passInput = Read-Host "Password"
-                    $mysqlPassword = if ([string]::IsNullOrEmpty($passInput)) { "root" } else { $passInput }
-                    
-                    $dbCreated = Create-Database $dbName $mysqlPassword $ports.MySQL
-                    if ($dbCreated) {
-                        break
-                    } else {
-                        Write-Host "[!] Error: Database creation failed!" -ForegroundColor Red
-                        $retryChoice = Read-Host "Do you want to retry database creation? (Y/N - 'N' will abort the installation)"
-                        if ($retryChoice.Trim().ToUpper() -ne "Y") {
-                            Write-Host "Installation aborted by user." -ForegroundColor Red
-                            Start-Sleep -Seconds 2
-                            $dbName = ""
-                            continue 2 # continue outer while loop
+            $configChoice = Read-Host "Do you want to configure database settings? (Y/N) [default: Y]"
+            $configureDb = if ([string]::IsNullOrEmpty($configChoice)) { "Y" } else { $configChoice.Trim().ToUpper() }
+            
+            if ($configureDb -eq "Y") {
+                # Determine default database name
+                $defaultDbName = "db_" + ($relFolder -replace '[^a-zA-Z0-9]', '_').Trim('_')
+                Write-Host "Enter database name [default: $defaultDbName]:"
+                $dbNameInput = Read-Host "DB Name"
+                $dbName = if ([string]::IsNullOrEmpty($dbNameInput)) { $defaultDbName } else { $dbNameInput.Trim() }
+                
+                Write-Host "Enter MySQL root username [default: root]:"
+                $userInput = Read-Host "DB User"
+                $dbUser = if ([string]::IsNullOrEmpty($userInput)) { "root" } else { $userInput.Trim() }
+
+                Write-Host "Enter MySQL root password [default: root]:"
+                $passInput = Read-Host "Password"
+                $dbPassword = if ([string]::IsNullOrEmpty($passInput)) { "root" } else { $passInput }
+                
+                $createChoice = Read-Host "Do you want to automatically create this database? (Y/N) [default: Y]"
+                $createDb = if ([string]::IsNullOrEmpty($createChoice)) { "Y" } else { $createChoice.Trim().ToUpper() }
+                
+                if ($createDb -eq "Y") {
+                    while ($true) {
+                        $dbCreated = Create-Database $dbName $dbPassword $ports.MySQL
+                        if ($dbCreated) {
+                            break
+                        } else {
+                            Write-Host "[!] Error: Database creation failed!" -ForegroundColor Red
+                            $retryChoice = Read-Host "Do you want to retry database creation? (Y/N - 'N' will abort the installation)"
+                            if ($retryChoice.Trim().ToUpper() -ne "Y") {
+                                Write-Host "Installation aborted by user." -ForegroundColor Red
+                                Start-Sleep -Seconds 2
+                                $dbName = ""
+                                continue MainLoop
+                            }
                         }
                     }
                 }
             }
+        } else {
+            $depsChoice = Read-Host "Do you want to automatically install NPM dependencies now? (Y/N) [default: Y]"
+            $installDeps = if ([string]::IsNullOrEmpty($depsChoice)) { "Y" } else { $depsChoice.Trim().ToUpper() }
         }
         
         # Ensure temp directory exists and is empty
@@ -528,20 +598,20 @@ function Start-Installer {
                     Extract-Zip $zipPath $targetPath
                     Flatten-Subfolder $targetPath "wordpress"
                     
-                    if ($createDb.Trim().ToUpper() -eq "Y") {
-                        Configure-WordPress $targetPath $dbName "root" $mysqlPassword "127.0.0.1:$($ports.MySQL)"
+                    if ($configureDb -eq "Y") {
+                        Configure-WordPress $targetPath $dbName $dbUser $dbPassword "127.0.0.1:$($ports.MySQL)"
                     }
                     
-                    Print-SuccessMessage "WordPress" $targetPath $relFolder "" $dbName $mysqlPassword
+                    Print-SuccessMessage "WordPress" $targetPath $relFolder "" $dbName $dbPassword
                 }
                 
                 "2" {
                     # Joomla
                     $zipPath = "$tempDir\joomla.zip"
-                    Download-File "https://github.com/joomla/joomla-cms/releases/download/5.1.1/Joomla_5.1.1-Stable-Full_Package.zip" $zipPath
+                    Download-File "https://github.com/joomla/joomla-cms/releases/download/5.2.2/Joomla_5.2.2-Stable-Full_Package.zip" $zipPath
                     Extract-Zip $zipPath $targetPath
                     
-                    Print-SuccessMessage "Joomla" $targetPath $relFolder "" $dbName $mysqlPassword
+                    Print-SuccessMessage "Joomla" $targetPath $relFolder "" $dbName $dbPassword
                 }
                 
                 "3" {
@@ -558,16 +628,16 @@ function Start-Installer {
                         throw "php.exe not found under $BaseDir\php. Cannot run Composer."
                     }
                     
-                    $proc = Start-Process -FilePath $phpExe -ArgumentList "`"$composerPhar`" create-project laravel/laravel `"$targetPath`" --prefer-dist --no-interaction" -NoNewWindow -PassThru -Wait
-                    if ($proc.ExitCode -ne 0) {
-                        throw "Composer project creation failed with exit code $($proc.ExitCode)."
+                    & $phpExe $composerPhar create-project laravel/laravel $targetPath --prefer-dist --no-interaction
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Composer project creation failed with exit code $LASTEXITCODE."
                     }
                     
-                    if ($createDb.Trim().ToUpper() -eq "Y") {
-                        Configure-Laravel $targetPath $dbName "root" $mysqlPassword "127.0.0.1" $ports.MySQL
+                    if ($configureDb -eq "Y") {
+                        Configure-Laravel $targetPath $dbName $dbUser $dbPassword "127.0.0.1" $ports.MySQL
                     }
                     
-                    Print-SuccessMessage "Laravel" $targetPath $relFolder "public" $dbName $mysqlPassword
+                    Print-SuccessMessage "Laravel" $targetPath $relFolder "public" $dbName $dbPassword
                 }
                 
                 "4" {
@@ -593,21 +663,21 @@ function Start-Installer {
                         Flatten-Subfolder $targetPath
                     }
                     
-                    if ($createDb.Trim().ToUpper() -eq "Y") {
-                        Configure-XenForo $targetPath $dbName "root" $mysqlPassword "127.0.0.1" $ports.MySQL
+                    if ($configureDb -eq "Y") {
+                        Configure-XenForo $targetPath $dbName $dbUser $dbPassword "127.0.0.1" $ports.MySQL
                     }
                     
-                    Print-SuccessMessage "XenForo" $targetPath $relFolder "install" $dbName $mysqlPassword
+                    Print-SuccessMessage "XenForo" $targetPath $relFolder "install" $dbName $dbPassword
                 }
                 
                 "5" {
                     # Drupal
                     $zipPath = "$tempDir\drupal.zip"
-                    Download-File "https://ftp.drupal.org/files/projects/drupal-10.2.6.zip" $zipPath
+                    Download-File "https://ftp.drupal.org/files/projects/drupal-10.3.0.zip" $zipPath
                     Extract-Zip $zipPath $targetPath
                     Flatten-Subfolder $targetPath
                     
-                    Print-SuccessMessage "Drupal" $targetPath $relFolder "" $dbName $mysqlPassword
+                    Print-SuccessMessage "Drupal" $targetPath $relFolder "" $dbName $dbPassword
                 }
                 
                 "6" {
@@ -615,15 +685,24 @@ function Start-Installer {
                     if (-not (Verify-NodeInstalled)) { continue }
                     
                     Write-Host "Creating React.js project using Vite... This may take a moment." -ForegroundColor Yellow
-                    $proc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c npm create vite@latest `"$targetPath`" -- --template react --yes" -NoNewWindow -PassThru -Wait
-                    if ($proc.ExitCode -ne 0) {
-                        throw "Vite React creation failed."
+                    cmd.exe /c "npx -y create-vite@latest `"$targetPath`" --template react"
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Vite React creation failed with exit code $LASTEXITCODE."
                     }
                     
-                    Write-Host "Installing NPM dependencies... This may take a minute." -ForegroundColor Yellow
-                    $procInstall = Start-Process -FilePath "cmd.exe" -ArgumentList "/c npm install" -WorkingDirectory $targetPath -NoNewWindow -PassThru -Wait
-                    if ($procInstall.ExitCode -ne 0) {
-                        Write-Host "[-] Warning: npm install failed. You may need to run 'npm install' manually inside the folder." -ForegroundColor Red
+                    if ($installDeps -eq "Y") {
+                        Write-Host "Installing NPM dependencies... This may take a minute." -ForegroundColor Yellow
+                        Push-Location $targetPath
+                        try {
+                            cmd.exe /c "npm install"
+                            if ($LASTEXITCODE -ne 0) {
+                                Write-Host "[-] Warning: npm install failed. You may need to run 'npm install' manually inside the folder." -ForegroundColor Red
+                            }
+                        } finally {
+                            Pop-Location
+                        }
+                    } else {
+                        Write-Host "[*] Skipping NPM dependencies installation. Run 'npm install' manually inside the project directory later." -ForegroundColor Yellow
                     }
                     
                     Write-Host "`n====================================================================" -ForegroundColor Green
@@ -631,6 +710,9 @@ function Start-Installer {
                     Write-Host "--------------------------------------------------------------------"
                     Write-Host " Target Folder:  $targetPath"
                     Write-Host " Next Steps:     cd $relFolder"
+                    if ($installDeps -ne "Y") {
+                        Write-Host "                 npm install" -ForegroundColor Yellow
+                    }
                     Write-Host "                 npm run dev"
                     Write-Host "                 (To run on network: npm run dev -- --host)" -ForegroundColor Cyan
                     Write-Host "====================================================================" -ForegroundColor Green
@@ -641,9 +723,10 @@ function Start-Installer {
                     if (-not (Verify-NodeInstalled)) { continue }
                     
                     Write-Host "Creating Next.js project... This takes a few minutes." -ForegroundColor Yellow
-                    $proc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c npx -y create-next-app@latest `"$targetPath`" --ts --tailwind --eslint --app --src-dir --import-alias `"`@/*`"` --use-npm --no-git" -NoNewWindow -PassThru -Wait
-                    if ($proc.ExitCode -ne 0) {
-                        throw "Next.js creation failed."
+                    $extraArgs = if ($installDeps -ne "Y") { "--skip-install" } else { "" }
+                    cmd.exe /c "npx -y create-next-app@latest `"$targetPath`" --ts --tailwind --eslint --app --src-dir --import-alias `"`@/*`"` --use-npm --no-git $extraArgs"
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Next.js creation failed with exit code $LASTEXITCODE."
                     }
                     
                     Write-Host "`n====================================================================" -ForegroundColor Green
@@ -651,6 +734,9 @@ function Start-Installer {
                     Write-Host "--------------------------------------------------------------------"
                     Write-Host " Target Folder:  $targetPath"
                     Write-Host " Next Steps:     cd $relFolder"
+                    if ($installDeps -ne "Y") {
+                        Write-Host "                 npm install" -ForegroundColor Yellow
+                    }
                     Write-Host "                 npm run dev"
                     Write-Host "                 (To run on network: npm run dev -- --host)" -ForegroundColor Cyan
                     Write-Host "====================================================================" -ForegroundColor Green
@@ -661,15 +747,24 @@ function Start-Installer {
                     if (-not (Verify-NodeInstalled)) { continue }
                     
                     Write-Host "Creating Vue.js project using Vite... This may take a moment." -ForegroundColor Yellow
-                    $proc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c npm create vite@latest `"$targetPath`" -- --template vue --yes" -NoNewWindow -PassThru -Wait
-                    if ($proc.ExitCode -ne 0) {
-                        throw "Vite Vue creation failed."
+                    cmd.exe /c "npx -y create-vite@latest `"$targetPath`" --template vue"
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Vite Vue creation failed with exit code $LASTEXITCODE."
                     }
                     
-                    Write-Host "Installing NPM dependencies... This may take a minute." -ForegroundColor Yellow
-                    $procInstall = Start-Process -FilePath "cmd.exe" -ArgumentList "/c npm install" -WorkingDirectory $targetPath -NoNewWindow -PassThru -Wait
-                    if ($procInstall.ExitCode -ne 0) {
-                        Write-Host "[-] Warning: npm install failed. You may need to run 'npm install' manually." -ForegroundColor Red
+                    if ($installDeps -eq "Y") {
+                        Write-Host "Installing NPM dependencies... This may take a minute." -ForegroundColor Yellow
+                        Push-Location $targetPath
+                        try {
+                            cmd.exe /c "npm install"
+                            if ($LASTEXITCODE -ne 0) {
+                                Write-Host "[-] Warning: npm install failed. You may need to run 'npm install' manually inside the folder." -ForegroundColor Red
+                            }
+                        } finally {
+                            Pop-Location
+                        }
+                    } else {
+                        Write-Host "[*] Skipping NPM dependencies installation. Run 'npm install' manually inside the project directory later." -ForegroundColor Yellow
                     }
                     
                     Write-Host "`n====================================================================" -ForegroundColor Green
@@ -677,6 +772,9 @@ function Start-Installer {
                     Write-Host "--------------------------------------------------------------------"
                     Write-Host " Target Folder:  $targetPath"
                     Write-Host " Next Steps:     cd $relFolder"
+                    if ($installDeps -ne "Y") {
+                        Write-Host "                 npm install" -ForegroundColor Yellow
+                    }
                     Write-Host "                 npm run dev"
                     Write-Host "                 (To run on network: npm run dev -- --host)" -ForegroundColor Cyan
                     Write-Host "====================================================================" -ForegroundColor Green
@@ -685,7 +783,7 @@ function Start-Installer {
                 "9" {
                     # PrestaShop
                     $zipPath = "$tempDir\prestashop.zip"
-                    Download-File "https://github.com/PrestaShop/PrestaShop/releases/download/8.1.5/prestashop_8.1.5.zip" $zipPath
+                    Download-File "https://github.com/PrestaShop/PrestaShop/releases/download/8.1.7/prestashop_8.1.7.zip" $zipPath
                     Extract-Zip $zipPath $targetPath
                     
                     # PrestaShop zip sometimes contains an inner index.php and a prestashop.zip file inside it!
@@ -699,7 +797,7 @@ function Start-Installer {
                         Remove-Item (Join-Path $targetPath "Install_PrestaShop.html") -Force -ErrorAction SilentlyContinue
                     }
                     
-                    Print-SuccessMessage "PrestaShop" $targetPath $relFolder "" $dbName $mysqlPassword
+                    Print-SuccessMessage "PrestaShop" $targetPath $relFolder "" $dbName $dbPassword
                 }
             }
         } catch {

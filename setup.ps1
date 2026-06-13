@@ -619,6 +619,7 @@ function Install-Modules {
         $content = $content -replace '(?m)^[ \t]*;?upload_max_filesize\s*=\s*\S+', 'upload_max_filesize = 64M'
         $content = $content -replace '(?m)^[ \t]*;?post_max_size\s*=\s*\S+', 'post_max_size = 64M'
         $content = $content -replace '(?m)^[ \t]*;?memory_limit\s*=\s*\S+', 'memory_limit = 256M'
+        $content = $content -replace '(?m)^[ \t]*;?error_reporting\s*=\s*.*$', 'error_reporting = E_ALL & ~E_DEPRECATED & ~E_STRICT'
         $content | Set-Content $phpIni -Force
         Write-Host "[+] PHP php.ini configured." -ForegroundColor Green
     }

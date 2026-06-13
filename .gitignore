@@ -9,7 +9,8 @@
 /php/
 /phpmyadmin/
 /composer.phar
-
+/ReadMe.txt
+--*win*--
 # Ignore downloaded zip packages and installer executables
 /*.zip
 /*.exe
