@@ -15,9 +15,10 @@
 /*.exe
 /vc_redist.x64.exe
 
-# Ignore local web projects under www but keep the core index dashboard
+# Ignore local web projects under www but keep the core index dashboard and info utility
 /www/*
 !/www/index.php
+!/www/info.php
 
 # Ignore project-level dependencies and build outputs
 **/node_modules/
