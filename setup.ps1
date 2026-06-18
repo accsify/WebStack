@@ -69,30 +69,342 @@ function Get-LocalIPAddress {
     return $ip
 }
 
+function Get-SystemPHPPath {
+    $cmd = Get-Command php.exe -ErrorAction SilentlyContinue
+    if ($cmd) {
+        $binDir = Split-Path -Parent $cmd.Source
+        if (Test-Path "$binDir\php.exe") {
+            return $binDir
+        }
+    }
+    $commonPaths = @(
+        "C:\php",
+        "C:\tools\php"
+    )
+    foreach ($path in $commonPaths) {
+        if (Test-Path "$path\php.exe") {
+            return $path
+        }
+    }
+    return $null
+}
+
+function Get-SystemMySQLPath {
+    $cmd = Get-Command mysqld.exe -ErrorAction SilentlyContinue
+    if ($cmd) {
+        $binDir = Split-Path -Parent $cmd.Source
+        $mysqlRoot = Split-Path -Parent $binDir
+        if (Test-Path "$binDir\mysqld.exe") {
+            return $mysqlRoot
+        }
+    }
+    try {
+        $service = Get-CimInstance -ClassName Win32_Service -Filter "Name LIKE '%mysql%' OR Name LIKE '%mariadb%'" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($service -and $service.PathName) {
+            $pathStr = $service.PathName.Trim()
+            if ($pathStr.StartsWith('"')) {
+                $endQuote = $pathStr.IndexOf('"', 1)
+                if ($endQuote -gt 0) {
+                    $exePath = $pathStr.Substring(1, $endQuote - 1)
+                } else {
+                    $exePath = $pathStr.Replace('"', '')
+                }
+            } else {
+                $exePath = ($pathStr -split "\s+")[0]
+            }
+            if (Test-Path $exePath) {
+                $binDir = Split-Path -Parent $exePath
+                $mysqlRoot = Split-Path -Parent $binDir
+                return $mysqlRoot
+            }
+        }
+    } catch {}
+    
+    $commonPaths = @(
+        "C:\Program Files\MySQL",
+        "C:\Program Files (x86)\MySQL",
+        "C:\Program Files\MariaDB",
+        "C:\laragon\bin\mysql"
+    )
+    foreach ($rootPath in $commonPaths) {
+        if (Test-Path $rootPath) {
+            $subFolder = Get-ChildItem -Path $rootPath -Directory -ErrorAction SilentlyContinue | Where-Object { Test-Path "$($_.FullName)\bin\mysqld.exe" } | Select-Object -First 1
+            if ($subFolder) {
+                return $subFolder.FullName
+            }
+        }
+    }
+    return $null
+}
+
+function Get-SystemApachePath {
+    $cmd = Get-Command httpd.exe -ErrorAction SilentlyContinue
+    if ($cmd) {
+        $binDir = Split-Path -Parent $cmd.Source
+        $apacheRoot = Split-Path -Parent $binDir
+        if (Test-Path "$binDir\httpd.exe") {
+            return $apacheRoot
+        }
+    }
+    try {
+        $service = Get-CimInstance -ClassName Win32_Service -Filter "Name LIKE '%apache%' OR Name LIKE '%httpd%'" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($service -and $service.PathName) {
+            $pathStr = $service.PathName.Trim()
+            if ($pathStr.StartsWith('"')) {
+                $endQuote = $pathStr.IndexOf('"', 1)
+                if ($endQuote -gt 0) {
+                    $exePath = $pathStr.Substring(1, $endQuote - 1)
+                } else {
+                    $exePath = $pathStr.Replace('"', '')
+                }
+            } else {
+                $exePath = ($pathStr -split "\s+")[0]
+            }
+            if (Test-Path $exePath) {
+                $binDir = Split-Path -Parent $exePath
+                $apacheRoot = Split-Path -Parent $binDir
+                return $apacheRoot
+            }
+        }
+    } catch {}
+    
+    $commonPaths = @(
+        "C:\Apache24",
+        "C:\apache",
+        "C:\laragon\bin\apache"
+    )
+    foreach ($path in $commonPaths) {
+        if (Test-Path "$path\bin\httpd.exe") {
+            return $path
+        }
+        if (Test-Path $path) {
+            $subFolder = Get-ChildItem -Path $path -Directory -ErrorAction SilentlyContinue | Where-Object { Test-Path "$($_.FullName)\bin\httpd.exe" } | Select-Object -First 1
+            if ($subFolder) {
+                return $subFolder.FullName
+            }
+        }
+    }
+    return $null
+}
+
 function Get-Statuses {
-    $apacheRunning = $false
-    $mysqlRunning = $false
+    $apacheLocal = $false
+    $mysqlLocal = $false
+    $apacheSystem = $false
+    $mysqlSystem = $false
     
-    # Check processes
-    if (Get-Process -Name "httpd" -ErrorAction SilentlyContinue) {
-        $apacheRunning = $true
-    }
-    if (Get-Process -Name "mysqld" -ErrorAction SilentlyContinue) {
-        $mysqlRunning = $true
+    # Check httpd processes
+    $httpdProcs = Get-Process -Name "httpd" -ErrorAction SilentlyContinue
+    foreach ($p in $httpdProcs) {
+        try {
+            if ($p.Path -like "$BaseDir*") {
+                $apacheLocal = $true
+            } else {
+                $apacheSystem = $true
+            }
+        } catch {
+            $apacheSystem = $true
+        }
     }
     
-    # Check services
+    # Check mysqld processes
+    $mysqldProcs = Get-Process -Name "mysqld" -ErrorAction SilentlyContinue
+    foreach ($p in $mysqldProcs) {
+        try {
+            if ($p.Path -like "$BaseDir*") {
+                $mysqlLocal = $true
+            } else {
+                $mysqlSystem = $true
+            }
+        } catch {
+            $mysqlSystem = $true
+        }
+    }
+    
+    # Check portable services
     $apacheService = Get-Service -Name "PortableApache" -ErrorAction SilentlyContinue
     if ($apacheService -and $apacheService.Status -eq "Running") {
-        $apacheRunning = $true
+        $apacheLocal = $true
     }
     $mysqlService = Get-Service -Name "PortableMySQL" -ErrorAction SilentlyContinue
     if ($mysqlService -and $mysqlService.Status -eq "Running") {
-        $mysqlRunning = $true
+        $mysqlLocal = $true
     }
     
-    return @{ Apache = $apacheRunning; MySQL = $mysqlRunning }
+    return @{
+        ApacheLocal = $apacheLocal;
+        ApacheSystem = $apacheSystem;
+        Apache = ($apacheLocal -or $apacheSystem);
+        MySQLLocal = $mysqlLocal;
+        MySQLSystem = $mysqlSystem;
+        MySQL = ($mysqlLocal -or $mysqlSystem);
+    }
 }
+
+function Get-SSLEnabledState {
+    $conf = "$BaseDir\apache24\conf\httpd.conf"
+    if (Test-Path $conf) {
+        $line = Get-Content $conf | Select-String -Pattern "^Include\s+conf/extra/httpd-ssl.conf" -ErrorAction SilentlyContinue
+        if ($line) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Configure-SSL-Helper {
+    param (
+        [bool]$ForceRegen = $false
+    )
+    
+    $opensslPath = "$BaseDir\apache24\bin\openssl.exe"
+    if (-not (Test-Path $opensslPath)) {
+        Write-Host "[-] openssl.exe not found at $opensslPath. Cannot generate SSL certificates." -ForegroundColor Red
+        return $false
+    }
+    
+    $currentLanIp = Get-LocalIPAddress
+    $ipFile = "$BaseDir\apache24\conf\ssl-ip.txt"
+    $storedIp = ""
+    if (Test-Path $ipFile) {
+        $storedIp = (Get-Content $ipFile).Trim()
+    }
+    
+    $certPath = "$BaseDir\apache24\conf\server.crt"
+    $keyPath = "$BaseDir\apache24\conf\server.key"
+    
+    $needsRegen = $ForceRegen -or (-not (Test-Path $certPath)) -or (-not (Test-Path $keyPath)) -or ($currentLanIp -ne $storedIp)
+    
+    if ($needsRegen) {
+        Write-Host "[*] Configuring SSL Certificate (LAN IP: $currentLanIp)..." -ForegroundColor Yellow
+        
+        $certDir = Split-Path -Parent $certPath
+        $keyDir = Split-Path -Parent $keyPath
+        if (-not (Test-Path $certDir)) { New-Item -ItemType Directory -Path $certDir -Force | Out-Null }
+        if (-not (Test-Path $keyDir)) { New-Item -ItemType Directory -Path $keyDir -Force | Out-Null }
+        
+        $opensslCnf = "$BaseDir\apache24\conf\openssl-san.cnf"
+        $altNames = @"
+[alt_names]
+DNS.1 = localhost
+DNS.2 = 127.0.0.1
+IP.1 = 127.0.0.1
+"@
+        if ($currentLanIp -ne "127.0.0.1") {
+            $altNames += "`r`nIP.2 = $currentLanIp"
+        }
+        
+        $cnfContent = @"
+[req]
+distinguished_name = req_distinguished_name
+x509_extensions = v3_req
+prompt = no
+
+[req_distinguished_name]
+CN = localhost
+
+[v3_req]
+keyUsage = nonRepudiation, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = @alt_names
+
+$altNames
+"@
+        $cnfContent | Set-Content $opensslCnf -Force
+        
+        Write-Host "Generating private key and self-signed certificate..." -ForegroundColor Yellow
+        try {
+            # Copy z.dll to zlib1.dll to satisfy OpenSSL's dynamic dependency on ZLIB1.dll
+            $zPath = "$BaseDir\apache24\bin\z.dll"
+            $zlib1Path = "$BaseDir\apache24\bin\zlib1.dll"
+            if ((Test-Path $zPath) -and (-not (Test-Path $zlib1Path))) {
+                Copy-Item -Path $zPath -Destination $zlib1Path -Force -ErrorAction SilentlyContinue
+            }
+            
+            & $opensslPath req -x509 -nodes -days 365 -newkey rsa:2048 -keyout $keyPath -out $certPath -config $opensslCnf
+            if ($LASTEXITCODE -ne 0) {
+                throw "OpenSSL failed with exit code $LASTEXITCODE"
+            }
+            $currentLanIp | Set-Content $ipFile -Force
+            Write-Host "[+] SSL Certificate generated successfully for localhost and $currentLanIp." -ForegroundColor Green
+        } catch {
+            Write-Host "[-] Failed to generate SSL Certificate: $_" -ForegroundColor Red
+            Remove-Item $opensslCnf -Force -ErrorAction SilentlyContinue
+            return $false
+        }
+        
+        Remove-Item $opensslCnf -Force -ErrorAction SilentlyContinue
+        
+        Write-Host "Trusting certificate locally..." -ForegroundColor Yellow
+        try {
+            $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+            if ($isAdmin) {
+                Write-Host "Elevated privileges detected. Importing to LocalMachine Root store (silent)..." -ForegroundColor Yellow
+                Get-ChildItem Cert:\LocalMachine\Root | Where-Object { $_.Subject -match "CN=localhost" } | Remove-Item -Confirm:$false -ErrorAction SilentlyContinue
+                Import-Certificate -FilePath $certPath -CertStoreLocation Cert:\LocalMachine\Root -ErrorAction Stop | Out-Null
+                Write-Host "[+] SSL Certificate trusted system-wide." -ForegroundColor Green
+            } else {
+                Write-Host "Non-elevated privileges. Importing to CurrentUser Root store (requires clicking 'Yes' on the Windows warning dialog)..." -ForegroundColor Yellow
+                $importCode = {
+                    param($certPath)
+                    Get-ChildItem Cert:\CurrentUser\Root | Where-Object { $_.Subject -match "CN=localhost" } | Remove-Item -Confirm:$false -ErrorAction SilentlyContinue
+                    Import-Certificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\Root -ErrorAction Stop | Out-Null
+                }
+                $job = Start-Job -ScriptBlock $importCode -ArgumentList $certPath
+                if ($job) {
+                    $job | Wait-Job -Timeout 3 | Out-Null
+                    if ($job.State -eq "Running") {
+                        Write-Host "[*] Import is running in background (waiting for user confirmation)..." -ForegroundColor Yellow
+                    } else {
+                        Receive-Job -Job $job -ErrorAction SilentlyContinue | Out-Null
+                        Write-Host "[+] SSL Certificate trust updated." -ForegroundColor Green
+                    }
+                    Remove-Job -Job $job -Force
+                }
+            }
+        } catch {
+            Write-Host "[-] Failed to trust certificate locally: $_" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "[*] SSL Certificate is up-to-date for IP: $currentLanIp" -ForegroundColor Green
+    }
+    
+    Write-Host "Enabling SSL modules in Apache httpd.conf..." -ForegroundColor Yellow
+    $conf = "$BaseDir\apache24\conf\httpd.conf"
+    if (Test-Path $conf) {
+        $c = Get-Content $conf -Raw
+        $sslUpdated = $false
+        if ($c -match '(?m)^#\s*LoadModule\s+ssl_module') {
+            $c = $c -replace '(?m)^#\s*LoadModule\s+ssl_module', 'LoadModule ssl_module'
+            $sslUpdated = $true
+        }
+        if ($c -match '(?m)^#\s*LoadModule\s+socache_shmcb_module') {
+            $c = $c -replace '(?m)^#\s*LoadModule\s+socache_shmcb_module', 'LoadModule socache_shmcb_module'
+            $sslUpdated = $true
+        }
+        if ($c -match '(?m)^#\s*Include\s+conf/extra/httpd-ssl\.conf') {
+            $c = $c -replace '(?m)^#\s*Include\s+conf/extra/httpd-ssl\.conf', 'Include conf/extra/httpd-ssl.conf'
+            $sslUpdated = $true
+        }
+        if ($sslUpdated) {
+            $c | Set-Content $conf -Force
+            Write-Host "[+] SSL module loading enabled in httpd.conf." -ForegroundColor Green
+        }
+    }
+    
+    $sslConf = "$BaseDir\apache24\conf\extra\httpd-ssl.conf"
+    if (Test-Path $sslConf) {
+        $c = Get-Content $sslConf -Raw
+        $c = $c -replace 'DocumentRoot\s+"[^"]*"', 'DocumentRoot "${SRVROOT}/../www"'
+        $c = $c -replace 'ServerName\s+\S+', 'ServerName localhost:443'
+        $c = $c -replace 'SSLCertificateFile\s+"[^"]*"', 'SSLCertificateFile "${SRVROOT}/conf/server.crt"'
+        $c = $c -replace 'SSLCertificateKeyFile\s+"[^"]*"', 'SSLCertificateKeyFile "${SRVROOT}/conf/server.key"'
+        $c | Set-Content $sslConf -Force
+        Write-Host "[+] httpd-ssl.conf updated with correct DocumentRoot and certificate paths." -ForegroundColor Green
+    }
+    return $true
+}
+
 
 function Verify-Installed {
     if (-not (Test-Path "$BaseDir\apache24") -or -not (Test-Path "$BaseDir\php") -or -not (Test-Path "$BaseDir\mysql")) {
@@ -482,99 +794,164 @@ function Install-Modules {
         Write-Host "  VC++ Redistributable:  [ INSTALLED ]" -ForegroundColor Green
     }
     
-    Write-Host "`nPreparing to download WAMP stack components..."
+    # Define and clean up temp installer directory
+    $tempDir = "$BaseDir\temp_installer"
+    if (Test-Path $tempDir) {
+        Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+    
+    Write-Host "`nPreparing stack components..."
     
     # Apache
     if (-not (Test-Path "$BaseDir\apache24")) {
-        Write-Host "`nDownloading Apache..." -ForegroundColor Yellow
-        $url = $null
-        try {
-            $page = Invoke-WebRequest -Uri "https://www.apachelounge.com/download/" -UseBasicParsing -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -TimeoutSec 10
-            $match = [regex]::Match($page.Content, 'href="([^"]*httpd-[^"]*-win64[^"]*\.zip)"', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-            if ($match.Success) {
-                $link = $match.Groups[1].Value
-                if ($link -notmatch "^http") {
-                    if ($link.StartsWith("/")) {
-                        $url = "https://www.apachelounge.com" + $link
-                    } else {
-                        $url = "https://www.apachelounge.com/download/" + $link
-                    }
-                } else {
-                    $url = $link
-                }
+        $sysApache = Get-SystemApachePath
+        $apacheCopied = $false
+        if ($sysApache) {
+            Write-Host "`n[+] System-installed Apache detected at: $sysApache" -ForegroundColor Green
+            Write-Host "Copying Apache files from system installation..." -ForegroundColor Yellow
+            try {
+                New-Item -ItemType Directory -Path "$tempDir\apache24" -Force | Out-Null
+                Copy-Item -Path "$sysApache\*" -Destination "$tempDir\apache24" -Recurse -Force -ErrorAction Stop
+                $apacheCopied = $true
+                Write-Host "[+] Apache successfully copied from system." -ForegroundColor Green
+            } catch {
+                Write-Host "[-] Failed to copy system Apache: $_. Falling back to downloading..." -ForegroundColor Yellow
             }
-        } catch {}
-        if ($null -eq $url) {
-            $url = "https://www.apachelounge.com/download/VS18/binaries/httpd-2.4.68-260610-Win64-VS18.zip"
         }
-        Write-Host "URL: $url" -ForegroundColor DarkGray
-        Invoke-WebRequest -Uri $url -OutFile "$BaseDir\apache.zip" -UserAgent "Mozilla/5.0"
-        Write-Host "Extracting Apache..." -ForegroundColor Cyan
-        Expand-Archive -Path "$BaseDir\apache.zip" -DestinationPath "$BaseDir" -Force
-        if (Test-Path "$BaseDir\Apache24") {
-            $tempPath = "$BaseDir\Apache24_temp"
-            Rename-Item -Path "$BaseDir\Apache24" -NewName "Apache24_temp" -Force
-            Rename-Item -Path $tempPath -NewName "apache24" -Force
+        
+        if (-not $apacheCopied) {
+            Write-Host "`nDownloading Apache..." -ForegroundColor Yellow
+            $url = $null
+            try {
+                $page = Invoke-WebRequest -Uri "https://www.apachelounge.com/download/" -UseBasicParsing -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -TimeoutSec 10
+                $match = [regex]::Match($page.Content, 'href="([^"]*httpd-[^"]*-win64[^"]*\.zip)"', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                if ($match.Success) {
+                    $link = $match.Groups[1].Value
+                    if ($link -notmatch "^http") {
+                        if ($link.StartsWith("/")) {
+                            $url = "https://www.apachelounge.com" + $link
+                        } else {
+                            $url = "https://www.apachelounge.com/download/" + $link
+                        }
+                    } else {
+                        $url = $link
+                    }
+                }
+            } catch {}
+            if ($null -eq $url) {
+                $url = "https://www.apachelounge.com/download/VS18/binaries/httpd-2.4.68-260610-Win64-VS18.zip"
+            }
+            Write-Host "URL: $url" -ForegroundColor DarkGray
+            Invoke-WebRequest -Uri $url -OutFile "$tempDir\apache.zip" -UserAgent "Mozilla/5.0"
+            Write-Host "Extracting Apache..." -ForegroundColor Cyan
+            New-Item -ItemType Directory -Path "$tempDir\apache_extracted" -Force | Out-Null
+            Expand-Archive -Path "$tempDir\apache.zip" -DestinationPath "$tempDir\apache_extracted" -Force
+            $extractedFolder = Get-ChildItem -Path "$tempDir\apache_extracted" -Directory | Where-Object { $_.Name -like "Apache*" } | Select-Object -First 1
+            if ($extractedFolder) {
+                Move-Item -Path $extractedFolder.FullName -Destination "$tempDir\apache24" -Force
+            } else {
+                Move-Item -Path "$tempDir\apache_extracted" -Destination "$tempDir\apache24" -Force
+            }
         }
-        Remove-Item "$BaseDir\apache.zip" -Force
+        
+        Move-Item -Path "$tempDir\apache24" -Destination "$BaseDir\apache24" -Force
     } else {
         Write-Host "[*] Apache already installed." -ForegroundColor Green
     }
     
     # PHP
     if (-not (Test-Path "$BaseDir\php")) {
-        Write-Host "`nDownloading PHP..." -ForegroundColor Yellow
-        $phpUrl = $null
-        try {
-            $page = Invoke-WebRequest -Uri "https://windows.php.net/download/" -UseBasicParsing -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -TimeoutSec 10
-            $matches = [regex]::Matches($page.Content, 'href="([^"]*php-\d+\.\d+\.\d+-Win32-[^"]+-x64\.zip)"', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-            foreach ($m in $matches) {
-                $link = $m.Groups[1].Value
-                if ($link -notmatch "-nts-") {
-                    if ($link -notmatch "^http") {
-                        $phpUrl = "https://windows.php.net" + $link
-                    } else {
-                        $phpUrl = $link
-                    }
-                    break
-                }
+        $sysPHP = Get-SystemPHPPath
+        $phpCopied = $false
+        if ($sysPHP) {
+            Write-Host "`n[+] System-installed PHP detected at: $sysPHP" -ForegroundColor Green
+            Write-Host "Copying PHP files from system installation..." -ForegroundColor Yellow
+            try {
+                New-Item -ItemType Directory -Path "$tempDir\php" -Force | Out-Null
+                Copy-Item -Path "$sysPHP\*" -Destination "$tempDir\php" -Recurse -Force -ErrorAction Stop
+                $phpCopied = $true
+                Write-Host "[+] PHP successfully copied from system." -ForegroundColor Green
+            } catch {
+                Write-Host "[-] Failed to copy system PHP: $_. Falling back to downloading..." -ForegroundColor Yellow
             }
-        } catch {}
-        if ($null -eq $phpUrl) {
-            $phpUrl = "https://windows.php.net/downloads/releases/archives/php-8.3.0-Win32-vs16-x64.zip"
         }
-        Write-Host "URL: $phpUrl" -ForegroundColor DarkGray
-        New-Item -ItemType Directory -Path "$BaseDir\php" -Force | Out-Null
-        Invoke-WebRequest -Uri $phpUrl -OutFile "$BaseDir\php.zip" -UserAgent "Mozilla/5.0"
-        Write-Host "Extracting PHP..." -ForegroundColor Cyan
-        Expand-Archive -Path "$BaseDir\php.zip" -DestinationPath "$BaseDir\php" -Force
-        Remove-Item "$BaseDir\php.zip" -Force
+        
+        if (-not $phpCopied) {
+            Write-Host "`nDownloading PHP..." -ForegroundColor Yellow
+            $phpUrl = $null
+            try {
+                $page = Invoke-WebRequest -Uri "https://windows.php.net/download/" -UseBasicParsing -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -TimeoutSec 10
+                $matches = [regex]::Matches($page.Content, 'href="([^"]*php-\d+\.\d+\.\d+-Win32-[^"]+-x64\.zip)"', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                foreach ($m in $matches) {
+                    $link = $m.Groups[1].Value
+                    if ($link -notmatch "-nts-") {
+                        if ($link -notmatch "^http") {
+                            $phpUrl = "https://windows.php.net" + $link
+                        } else {
+                            $phpUrl = $link
+                        }
+                        break
+                    }
+                }
+            } catch {}
+            if ($null -eq $phpUrl) {
+                $phpUrl = "https://windows.php.net/downloads/releases/archives/php-8.3.0-Win32-vs16-x64.zip"
+            }
+            Write-Host "URL: $phpUrl" -ForegroundColor DarkGray
+            New-Item -ItemType Directory -Path "$tempDir\php" -Force | Out-Null
+            Invoke-WebRequest -Uri $phpUrl -OutFile "$tempDir\php.zip" -UserAgent "Mozilla/5.0"
+            Write-Host "Extracting PHP..." -ForegroundColor Cyan
+            Expand-Archive -Path "$tempDir\php.zip" -DestinationPath "$tempDir\php" -Force
+        }
+        
+        Move-Item -Path "$tempDir\php" -Destination "$BaseDir\php" -Force
     } else {
         Write-Host "[*] PHP already installed." -ForegroundColor Green
     }
     
     # MySQL
     if (-not (Test-Path "$BaseDir\mysql")) {
-        Write-Host "`nDownloading MySQL..." -ForegroundColor Yellow
-        # Use Danish academic mirror mirrors.dotsrc.org as the primary fast mirror
-        $mysqlUrl = "https://mirrors.dotsrc.org/mysql/Downloads/MySQL-8.0/mysql-8.0.28-winx64.zip"
-        Write-Host "URL: $mysqlUrl" -ForegroundColor DarkGray
-        try {
-            Invoke-WebRequest -Uri $mysqlUrl -OutFile "$BaseDir\mysql.zip" -UserAgent "Mozilla/5.0" -ErrorAction Stop
-        } catch {
-            Write-Host "Mirror download failed. Trying official archive backup..." -ForegroundColor Yellow
-            $mysqlUrl = "https://downloads.mysql.com/get/Downloads/MySQL-8.0/mysql-8.0.37-winx64.zip"
-            Invoke-WebRequest -Uri $mysqlUrl -OutFile "$BaseDir\mysql.zip" -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" -ErrorAction Stop
+        $sysMySQL = Get-SystemMySQLPath
+        $mysqlCopied = $false
+        if ($sysMySQL) {
+            Write-Host "`n[+] System-installed MySQL detected at: $sysMySQL" -ForegroundColor Green
+            Write-Host "Copying MySQL files from system installation (excluding data folder)..." -ForegroundColor Yellow
+            try {
+                New-Item -ItemType Directory -Path "$tempDir\mysql" -Force | Out-Null
+                Get-ChildItem -Path $sysMySQL -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne "data" -and $_.Name -ne "Uploads" } | ForEach-Object {
+                    Copy-Item -Path $_.FullName -Destination "$tempDir\mysql" -Recurse -Force -ErrorAction Stop
+                }
+                $mysqlCopied = $true
+                Write-Host "[+] MySQL successfully copied from system." -ForegroundColor Green
+            } catch {
+                Write-Host "[-] Failed to copy system MySQL: $_. Falling back to downloading..." -ForegroundColor Yellow
+            }
         }
-        Write-Host "Extracting MySQL..." -ForegroundColor Cyan
-        # Clean up any residual failed extraction folders matching mysql-* to prevent conflicts
-        Get-ChildItem -Path "$BaseDir" -Directory | Where-Object { $_.Name -like "mysql-*" } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-        Expand-Archive -Path "$BaseDir\mysql.zip" -DestinationPath "$BaseDir" -Force
-        $mysqlFolder = Get-ChildItem -Path "$BaseDir" -Directory | Where-Object { $_.Name -like "mysql-*" } | Select-Object -First 1
-        if ($null -ne $mysqlFolder) {
-            Rename-Item -Path $mysqlFolder.FullName -NewName "mysql"
+        
+        if (-not $mysqlCopied) {
+            Write-Host "`nDownloading MySQL..." -ForegroundColor Yellow
+            $mysqlUrl = "https://mirrors.dotsrc.org/mysql/Downloads/MySQL-8.0/mysql-8.0.28-winx64.zip"
+            Write-Host "URL: $mysqlUrl" -ForegroundColor DarkGray
+            try {
+                Invoke-WebRequest -Uri $mysqlUrl -OutFile "$tempDir\mysql.zip" -UserAgent "Mozilla/5.0" -ErrorAction Stop
+            } catch {
+                Write-Host "Mirror download failed. Trying official archive backup..." -ForegroundColor Yellow
+                $mysqlUrl = "https://downloads.mysql.com/get/Downloads/MySQL-8.0/mysql-8.0.37-winx64.zip"
+                Invoke-WebRequest -Uri $mysqlUrl -OutFile "$tempDir\mysql.zip" -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" -ErrorAction Stop
+            }
+            Write-Host "Extracting MySQL..." -ForegroundColor Cyan
+            New-Item -ItemType Directory -Path "$tempDir\mysql_extracted" -Force | Out-Null
+            Expand-Archive -Path "$tempDir\mysql.zip" -DestinationPath "$tempDir\mysql_extracted" -Force
+            $mysqlFolder = Get-ChildItem -Path "$tempDir\mysql_extracted" -Directory | Where-Object { $_.Name -like "mysql-*" } | Select-Object -First 1
+            if ($mysqlFolder) {
+                Move-Item -Path $mysqlFolder.FullName -Destination "$tempDir\mysql" -Force
+            } else {
+                Move-Item -Path "$tempDir\mysql_extracted" -Destination "$tempDir\mysql" -Force
+            }
         }
-        Remove-Item "$BaseDir\mysql.zip" -Force
+        
+        Move-Item -Path "$tempDir\mysql" -Destination "$BaseDir\mysql" -Force
     } else {
         Write-Host "[*] MySQL already installed." -ForegroundColor Green
     }
@@ -584,16 +961,24 @@ function Install-Modules {
         Write-Host "`nDownloading phpMyAdmin..." -ForegroundColor Yellow
         $pmaUrl = "https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-all-languages.zip"
         Write-Host "URL: $pmaUrl" -ForegroundColor DarkGray
-        Invoke-WebRequest -Uri $pmaUrl -OutFile "$BaseDir\pma.zip" -UserAgent "Mozilla/5.0"
+        Invoke-WebRequest -Uri $pmaUrl -OutFile "$tempDir\pma.zip" -UserAgent "Mozilla/5.0"
         Write-Host "Extracting phpMyAdmin..." -ForegroundColor Cyan
-        Expand-Archive -Path "$BaseDir\pma.zip" -DestinationPath "$BaseDir" -Force
-        $pmaFolder = Get-ChildItem -Path "$BaseDir" -Directory | Where-Object { $_.Name -like "phpMyAdmin-*" } | Select-Object -First 1
-        if ($null -ne $pmaFolder) {
-            Rename-Item -Path $pmaFolder.FullName -NewName "phpmyadmin"
+        New-Item -ItemType Directory -Path "$tempDir\pma_extracted" -Force | Out-Null
+        Expand-Archive -Path "$tempDir\pma.zip" -DestinationPath "$tempDir\pma_extracted" -Force
+        $pmaFolder = Get-ChildItem -Path "$tempDir\pma_extracted" -Directory | Where-Object { $_.Name -like "phpMyAdmin-*" } | Select-Object -First 1
+        if ($pmaFolder) {
+            Move-Item -Path $pmaFolder.FullName -Destination "$tempDir\phpmyadmin" -Force
+        } else {
+            Move-Item -Path "$tempDir\pma_extracted" -Destination "$tempDir\phpmyadmin" -Force
         }
-        Remove-Item "$BaseDir\pma.zip" -Force
+        Move-Item -Path "$tempDir\phpmyadmin" -Destination "$BaseDir\phpmyadmin" -Force
     } else {
         Write-Host "[*] phpMyAdmin already installed." -ForegroundColor Green
+    }
+    
+    # Cleanup temp folder
+    if (Test-Path $tempDir) {
+        Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
     }
     
     # www
@@ -608,20 +993,27 @@ function Install-Modules {
     }
     if (Test-Path $phpIni) {
         $content = Get-Content $phpIni -Raw
-        # Match comments, spaces, and optional quotes around ext
         $content = $content -replace '(?m)^[ \t]*;?extension_dir\s*=\s*\S+', "extension_dir = `"$baseDirForward/php/ext`""
         
-        $exts = @('curl', 'fileinfo', 'gd', 'mbstring', 'mysqli', 'openssl', 'pdo_mysql')
+        $exts = @('curl', 'fileinfo', 'gd', 'intl', 'mbstring', 'exif', 'mysqli', 'openssl', 'pdo_mysql', 'pdo_sqlite', 'sqlite3', 'sodium', 'zip', 'bz2', 'soap', 'gmp')
         foreach ($ext in $exts) {
-            # Match comments and spaces before extension declarations
             $content = $content -replace "(?m)^[ \t]*;?extension\s*=\s*$ext", "extension=$ext"
         }
-        $content = $content -replace '(?m)^[ \t]*;?upload_max_filesize\s*=\s*\S+', 'upload_max_filesize = 64M'
-        $content = $content -replace '(?m)^[ \t]*;?post_max_size\s*=\s*\S+', 'post_max_size = 64M'
-        $content = $content -replace '(?m)^[ \t]*;?memory_limit\s*=\s*\S+', 'memory_limit = 256M'
+        $content = $content -replace '(?m)^[ \t]*;?upload_max_filesize\s*=\s*\S+', 'upload_max_filesize = 128M'
+        $content = $content -replace '(?m)^[ \t]*;?post_max_size\s*=\s*\S+', 'post_max_size = 128M'
+        $content = $content -replace '(?m)^[ \t]*;?memory_limit\s*=\s*\S+', 'memory_limit = 512M'
+        $content = $content -replace '(?m)^[ \t]*;?max_execution_time\s*=\s*\S+', 'max_execution_time = 300'
+        $content = $content -replace '(?m)^[ \t]*;?max_input_time\s*=\s*\S+', 'max_input_time = 300'
+        
+        if ($content -match 'max_input_vars') {
+            $content = $content -replace '(?m)^[ \t]*;?max_input_vars\s*=\s*\S+', 'max_input_vars = 5000'
+        } else {
+            $content += "`r`nmax_input_vars = 5000`r`n"
+        }
+        
         $content = $content -replace '(?m)^[ \t]*;?error_reporting\s*=\s*.*$', 'error_reporting = E_ALL & ~E_DEPRECATED & ~E_STRICT'
         $content | Set-Content $phpIni -Force
-        Write-Host "[+] PHP php.ini configured." -ForegroundColor Green
+        Write-Host "[+] PHP php.ini configured with all necessary extensions and limits." -ForegroundColor Green
     }
     
     # Configure Apache
@@ -632,6 +1024,14 @@ function Install-Modules {
         $content = $content -replace 'DocumentRoot "\$\{SRVROOT\}/htdocs"', "DocumentRoot `"$baseDirForward/www`""
         $content = $content -replace '<Directory "\$\{SRVROOT\}/htdocs">', "<Directory `"$baseDirForward/www`">"
         $content = $content -replace 'DirectoryIndex index.html', 'DirectoryIndex index.php index.html'
+        
+        # Enable URL rewriting and key modules for frameworks like Laravel/WordPress
+        $modules = @('rewrite_module', 'headers_module', 'expires_module', 'deflate_module')
+        foreach ($mod in $modules) {
+            $content = $content -replace "#\s*LoadModule\s+$mod", "LoadModule $mod"
+        }
+        # Enable AllowOverride All in the DocumentRoot Directory block
+        $content = $content -replace '(?si)(<Directory\s+"[^"]*www">.*?AllowOverride\s+)None', '${1}All'
         
         # Clean up any existing PHP Integration block to avoid duplicate configurations
         $content = $content -replace '(?s)(?:\r?\n)?\s*# PHP Integration.*?</Directory>\s*', ''
@@ -661,12 +1061,12 @@ function Install-Modules {
         }
         
         $phpBlock = @"
-
+ 
 # PHP Integration
 $loadFiles`LoadModule php_module "`$`{SRVROOT}/../php/$phpDll"
 AddHandler application/x-httpd-php .php
 PHPIniDir "`$`{SRVROOT}/../php"
-
+ 
 # phpMyAdmin Alias
 Alias /phpmyadmin "`$`{SRVROOT}/../phpmyadmin"
 <Directory "`$`{SRVROOT}/../phpmyadmin">
@@ -677,7 +1077,7 @@ Alias /phpmyadmin "`$`{SRVROOT}/../phpmyadmin"
 "@
         $content += "`r`n" + $phpBlock
         $content | Set-Content $confPath
-        Write-Host "[+] Apache httpd.conf configured." -ForegroundColor Green
+        Write-Host "[+] Apache httpd.conf configured (mod_rewrite and AllowOverride All enabled)." -ForegroundColor Green
     }
     
     # Configure MySQL
@@ -692,7 +1092,7 @@ datadir = "$mysqlDirForward/data"
 default_authentication_plugin = mysql_native_password
 max_allowed_packet = 64M
 sql_mode = "NO_ENGINE_SUBSTITUTION"
-
+ 
 [client]
 port = 3306
 "@
@@ -749,34 +1149,63 @@ function Run-Server-Interactive {
     $ports = Get-Ports
     $state = Get-NetworkAccessState
     
-    # Check port availability
-    $apacheConn = Get-NetTCPConnection -LocalPort $ports.Apache -ErrorAction SilentlyContinue
-    if ($apacheConn) {
-        Write-Host "[!] Error: Apache port $($ports.Apache) is occupied by another program." -ForegroundColor Red
-        Read-Host "Press Enter to return..."
-        return
-    }
-    $mysqlConn = Get-NetTCPConnection -LocalPort $ports.MySQL -ErrorAction SilentlyContinue
-    if ($mysqlConn) {
-        Write-Host "[!] Error: MySQL port $($ports.MySQL) is occupied by another program." -ForegroundColor Red
-        Read-Host "Press Enter to return..."
-        return
+    if (Get-SSLEnabledState) {
+        Configure-SSL-Helper
     }
     
-    # Configure firewall rule if network access is public
-    if ($state -ne "Localhost Only (Private)") {
+    $statuses = Get-Statuses
+    $apacheRunningOnPort = $false
+    $mysqlRunningOnPort = $false
+    
+    if ($statuses.ApacheLocal) {
+        $apacheRunningOnPort = $true
+    } else {
+        $apacheConn = Get-NetTCPConnection -LocalPort $ports.Apache -ErrorAction SilentlyContinue
+        if ($apacheConn) {
+            if ($statuses.ApacheSystem) {
+                Write-Host "[*] Apache port $($ports.Apache) is occupied by system Apache. Using it." -ForegroundColor Green
+                $apacheRunningOnPort = $true
+            } else {
+                Write-Host "[!] Error: Apache port $($ports.Apache) is occupied by another program." -ForegroundColor Red
+                Read-Host "Press Enter to return..."
+                return
+            }
+        }
+    }
+    
+    if ($statuses.MySQLLocal) {
+        $mysqlRunningOnPort = $true
+    } else {
+        $mysqlConn = Get-NetTCPConnection -LocalPort $ports.MySQL -ErrorAction SilentlyContinue
+        if ($mysqlConn) {
+            if ($statuses.MySQLSystem) {
+                Write-Host "[*] MySQL port $($ports.MySQL) is occupied by system MySQL. Using it." -ForegroundColor Green
+                $mysqlRunningOnPort = $true
+            } else {
+                Write-Host "[!] Error: MySQL port $($ports.MySQL) is occupied by another program." -ForegroundColor Red
+                Read-Host "Press Enter to return..."
+                return
+            }
+        }
+    }
+    
+    if ($state -ne "Localhost Only (Private)" -and -not $apacheRunningOnPort) {
         Configure-Firewall -Action "Add" -Port $ports.Apache
     }
     
-    Write-Host "Starting Apache in minimized window..."
-    Start-Process -FilePath "$BaseDir\apache24\bin\httpd.exe" -WindowStyle Minimized
-    Start-Sleep -Seconds 1
+    if (-not $apacheRunningOnPort) {
+        Write-Host "Starting Apache in minimized window..."
+        Start-Process -FilePath "$BaseDir\apache24\bin\httpd.exe" -WindowStyle Minimized
+        Start-Sleep -Seconds 1
+    }
     
-    Write-Host "Starting MySQL in minimized window..."
-    Start-Process -FilePath "$BaseDir\mysql\bin\mysqld.exe" -ArgumentList "--defaults-file=`"$BaseDir\mysql\my.ini`"" -WindowStyle Minimized
-    Start-Sleep -Seconds 2
+    if (-not $mysqlRunningOnPort) {
+        Write-Host "Starting MySQL in minimized window..."
+        Start-Process -FilePath "$BaseDir\mysql\bin\mysqld.exe" -ArgumentList "--defaults-file=`"$BaseDir\mysql\my.ini`"" -WindowStyle Minimized
+        Start-Sleep -Seconds 2
+    }
     
-    Write-Host "[+] Servers launched in minimized windows." -ForegroundColor Green
+    Write-Host "[+] Servers active/launched in minimized windows." -ForegroundColor Green
     Read-Host "Press Enter to return to menu..."
 }
 
@@ -803,6 +1232,53 @@ function Start-Server {
     $ports = Get-Ports
     $state = Get-NetworkAccessState
     
+    if (Get-SSLEnabledState) {
+        Configure-SSL-Helper
+    }
+    
+    $statuses = Get-Statuses
+    $apacheRunningOnPort = $false
+    $mysqlRunningOnPort = $false
+    
+    # Check if local is running or if port is occupied
+    if ($statuses.ApacheLocal) {
+        $apacheRunningOnPort = $true
+    } else {
+        $apacheConn = Get-NetTCPConnection -LocalPort $ports.Apache -ErrorAction SilentlyContinue
+        if ($apacheConn) {
+            if ($statuses.ApacheSystem) {
+                Write-Host "[*] Apache port $($ports.Apache) is occupied by system Apache. Using it." -ForegroundColor Green
+                $apacheRunningOnPort = $true
+            } else {
+                Write-Host "[!] Error: Apache port $($ports.Apache) is occupied by another program." -ForegroundColor Red
+                Read-Host "Press Enter to return..."
+                return
+            }
+        }
+    }
+    
+    if ($statuses.MySQLLocal) {
+        $mysqlRunningOnPort = $true
+    } else {
+        $mysqlConn = Get-NetTCPConnection -LocalPort $ports.MySQL -ErrorAction SilentlyContinue
+        if ($mysqlConn) {
+            if ($statuses.MySQLSystem) {
+                Write-Host "[*] MySQL port $($ports.MySQL) is occupied by system MySQL. Using it." -ForegroundColor Green
+                $mysqlRunningOnPort = $true
+            } else {
+                Write-Host "[!] Error: MySQL port $($ports.MySQL) is occupied by another program." -ForegroundColor Red
+                Read-Host "Press Enter to return..."
+                return
+            }
+        }
+    }
+    
+    if ($apacheRunningOnPort -and $mysqlRunningOnPort) {
+        Write-Host "[*] Servers are already running (or active via system)." -ForegroundColor Yellow
+        Read-Host "Press Enter to return..."
+        return
+    }
+    
     # Check if services exist
     $apacheSvc = Get-Service -Name "PortableApache" -ErrorAction SilentlyContinue
     $mysqlSvc = Get-Service -Name "PortableMySQL" -ErrorAction SilentlyContinue
@@ -810,57 +1286,47 @@ function Start-Server {
     if ($apacheSvc -and $mysqlSvc) {
         Write-Host "Starting Apache and MySQL Services (requires elevation)..." -ForegroundColor Yellow
         
-        # Configure firewall rule if network access is public and user is Admin
         $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-        if ($state -ne "Localhost Only (Private)" -and $isAdmin) {
+        if ($state -ne "Localhost Only (Private)" -and $isAdmin -and -not $apacheRunningOnPort) {
             Configure-Firewall -Action "Add" -Port $ports.Apache
         }
         
         try {
-            Start-Service -Name "PortableApache", "PortableMySQL" -ErrorAction Stop
+            $svcsToStart = @()
+            if (-not $apacheRunningOnPort) { $svcsToStart += "PortableApache" }
+            if (-not $mysqlRunningOnPort) { $svcsToStart += "PortableMySQL" }
+            if ($svcsToStart.Length -gt 0) {
+                Start-Service -Name $svcsToStart -ErrorAction Stop
+            }
             Write-Host "[+] Auto-run services started successfully." -ForegroundColor Green
         } catch {
             Write-Host "[!] Failed to start services. Requesting elevation..." -ForegroundColor Yellow
-            Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"Start-Service PortableApache, PortableMySQL`"" -Verb RunAs -Wait
+            $cmdLine = ""
+            if (-not $apacheRunningOnPort) { $cmdLine += "Start-Service PortableApache;" }
+            if (-not $mysqlRunningOnPort) { $cmdLine += "Start-Service PortableMySQL;" }
+            if ($cmdLine) {
+                Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"$cmdLine`"" -Verb RunAs -Wait
+            }
         }
         Start-Sleep -Seconds 2
         return
     }
     
-    # Check if already running in user-space
-    $statuses = Get-Statuses
-    if ($statuses.Apache -and $statuses.MySQL) {
-        Write-Host "[*] Servers are already running." -ForegroundColor Yellow
-        Read-Host "Press Enter to return..."
-        return
-    }
-    
-    # Port checks
-    $apacheConn = Get-NetTCPConnection -LocalPort $ports.Apache -ErrorAction SilentlyContinue
-    if ($apacheConn) {
-        Write-Host "[!] Error: Apache port $($ports.Apache) is occupied." -ForegroundColor Red
-        Read-Host "Press Enter..."
-        return
-    }
-    $mysqlConn = Get-NetTCPConnection -LocalPort $ports.MySQL -ErrorAction SilentlyContinue
-    if ($mysqlConn) {
-        Write-Host "[!] Error: MySQL port $($ports.MySQL) is occupied." -ForegroundColor Red
-        Read-Host "Press Enter..."
-        return
-    }
-    
-    # Configure firewall rule if network access is public
-    if ($state -ne "Localhost Only (Private)") {
+    if ($state -ne "Localhost Only (Private)" -and -not $apacheRunningOnPort) {
         Configure-Firewall -Action "Add" -Port $ports.Apache
     }
     
-    Write-Host "Starting Apache in background..."
-    Start-Process -FilePath "$BaseDir\apache24\bin\httpd.exe" -WindowStyle Hidden
-    Start-Sleep -Seconds 1
+    if (-not $apacheRunningOnPort) {
+        Write-Host "Starting Apache in background..."
+        Start-Process -FilePath "$BaseDir\apache24\bin\httpd.exe" -WindowStyle Hidden
+        Start-Sleep -Seconds 1
+    }
     
-    Write-Host "Starting MySQL in background..."
-    Start-Process -FilePath "$BaseDir\mysql\bin\mysqld.exe" -ArgumentList "--defaults-file=`"$BaseDir\mysql\my.ini`"" -WindowStyle Hidden
-    Start-Sleep -Seconds 2
+    if (-not $mysqlRunningOnPort) {
+        Write-Host "Starting MySQL in background..."
+        Start-Process -FilePath "$BaseDir\mysql\bin\mysqld.exe" -ArgumentList "--defaults-file=`"$BaseDir\mysql\my.ini`"" -WindowStyle Hidden
+        Start-Sleep -Seconds 2
+    }
     
     Write-Host "[+] Servers started in background (hidden processes)." -ForegroundColor Green
     Start-Sleep -Seconds 2
@@ -883,10 +1349,19 @@ function Stop-Server {
         }
     }
     
-    # Kill user-space processes
-    Write-Host "Stopping user-space processes..." -ForegroundColor Yellow
-    Stop-Process -Name "httpd" -Force -ErrorAction SilentlyContinue
-    Stop-Process -Name "mysqld" -Force -ErrorAction SilentlyContinue
+    # Kill user-space processes only if they run from $BaseDir to avoid killing system ones
+    Write-Host "Stopping stack user-space processes..." -ForegroundColor Yellow
+    Get-Process -Name "httpd" -ErrorAction SilentlyContinue | Where-Object {
+        try {
+            $_.Path -like "$BaseDir*"
+        } catch { $false }
+    } | Stop-Process -Force -ErrorAction SilentlyContinue
+    
+    Get-Process -Name "mysqld" -ErrorAction SilentlyContinue | Where-Object {
+        try {
+            $_.Path -like "$BaseDir*"
+        } catch { $false }
+    } | Stop-Process -Force -ErrorAction SilentlyContinue
     
     Write-Host "[+] Server components stopped successfully." -ForegroundColor Green
     Start-Sleep -Seconds 2
@@ -989,6 +1464,7 @@ function Change-Options {
         Clear-Host
         $ports = Get-Ports
         $netState = Get-NetworkAccessState
+        $sslState = if (Get-SSLEnabledState) { "Enabled" } else { "Disabled" }
         Write-Host "====================================================================" -ForegroundColor Cyan
         Write-Host " CONFIGURATION OPTIONS MANAGEMENT" -ForegroundColor Cyan
         Write-Host "====================================================================" -ForegroundColor Cyan
@@ -997,9 +1473,10 @@ function Change-Options {
         Write-Host " 3. Change / Set MySQL Root Password"
         Write-Host " 4. Modify PHP limits (Memory Limit, Execution Time)"
         Write-Host " 5. Toggle Network Access (Current: $netState)"
-        Write-Host " 6. Back to Main Menu"
+        Write-Host " 6. Enable / Configure SSL (HTTPS) (Current: $sslState)"
+        Write-Host " 7. Back to Main Menu"
         Write-Host "--------------------------------------------------------------------"
-        $optChoice = Read-Host "Select an option (1-6)"
+        $optChoice = Read-Host "Select an option (1-7)"
         if ($null -ne $optChoice) { $optChoice = $optChoice.Trim() }
         
         switch ($optChoice) {
@@ -1119,7 +1596,41 @@ function Change-Options {
                 }
                 Prompt-ApacheRestart
             }
-            "6" { return }
+            "6" {
+                Clear-Host
+                Write-Host "====================================================================" -ForegroundColor Cyan
+                Write-Host " CONFIGURE SSL (HTTPS)" -ForegroundColor Cyan
+                Write-Host "====================================================================" -ForegroundColor Cyan
+                Write-Host "Current Status: $sslState"
+                Write-Host " 1. Enable / Regenerate SSL Certificate (Localhost & dynamic LAN IP)"
+                Write-Host " 2. Disable SSL (HTTPS)"
+                Write-Host " 3. Back"
+                Write-Host "--------------------------------------------------------------------"
+                $sslChoice = Read-Host "Select choice (1-3)"
+                if ($null -ne $sslChoice) { $sslChoice = $sslChoice.Trim() }
+                
+                if ($sslChoice -eq "1") {
+                    $res = Configure-SSL-Helper -ForceRegen $true
+                    if ($res) {
+                        Prompt-ApacheRestart
+                    } else {
+                        Read-Host "Press Enter to continue..." | Out-Null
+                    }
+                } elseif ($sslChoice -eq "2") {
+                    Write-Host "Disabling SSL modules in Apache httpd.conf..." -ForegroundColor Yellow
+                    $conf = "$BaseDir\apache24\conf\httpd.conf"
+                    if (Test-Path $conf) {
+                        $c = Get-Content $conf -Raw
+                        $c = $c -replace '(?m)^LoadModule ssl_module', '#LoadModule ssl_module'
+                        $c = $c -replace '(?m)^LoadModule socache_shmcb_module', '#LoadModule socache_shmcb_module'
+                        $c = $c -replace '(?m)^Include conf/extra/httpd-ssl.conf', '#Include conf/extra/httpd-ssl.conf'
+                        $c | Set-Content $conf -Force
+                        Write-Host "[+] SSL disabled in httpd.conf." -ForegroundColor Green
+                        Prompt-ApacheRestart
+                    }
+                }
+            }
+            "7" { return }
         }
     }
 }
@@ -1139,19 +1650,21 @@ function Show-Menu {
     
     if ($statuses.Apache) {
         $netState = Get-NetworkAccessState
+        $suffix = if ($statuses.ApacheSystem -and -not $statuses.ApacheLocal) { " (System)" } else { "" }
         if ($netState -eq "LAN Network (Public)") {
             $ip = Get-LocalIPAddress
-            Write-Host "  Apache Web Server: [ RUNNING ] on port $($ports.Apache) (Public LAN)" -ForegroundColor Green
+            Write-Host "  Apache Web Server: [ RUNNING ] on port $($ports.Apache) (Public LAN)$suffix" -ForegroundColor Green
             Write-Host "                     LAN Access URL: http://$ip`:$($ports.Apache)/" -ForegroundColor Cyan
         } else {
-            Write-Host "  Apache Web Server: [ RUNNING ] on port $($ports.Apache) (Local Only)" -ForegroundColor Green
+            Write-Host "  Apache Web Server: [ RUNNING ] on port $($ports.Apache) (Local Only)$suffix" -ForegroundColor Green
         }
     } else {
         Write-Host "  Apache Web Server: [ STOPPED ]" -ForegroundColor Red
     }
     
     if ($statuses.MySQL) {
-        Write-Host "  MySQL Database:   [ RUNNING ] on port $($ports.MySQL)" -ForegroundColor Green
+        $suffix = if ($statuses.MySQLSystem -and -not $statuses.MySQLLocal) { " (System)" } else { "" }
+        Write-Host "  MySQL Database:   [ RUNNING ] on port $($ports.MySQL)$suffix" -ForegroundColor Green
     } else {
         Write-Host "  MySQL Database:   [ STOPPED ]" -ForegroundColor Red
     }
@@ -1188,6 +1701,10 @@ if ($args -contains "--stop") {
 }
 if ($args -contains "--restart") {
     Restart-Server
+    exit
+}
+if ($args -contains "--ssl") {
+    Configure-SSL-Helper -ForceRegen $true
     exit
 }
 if ($args -contains "--status") {

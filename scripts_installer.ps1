@@ -86,7 +86,6 @@ function Print-SuccessMessage {
     Write-Host "--------------------------------------------------------------------"
     Write-Host " Target Folder:  $targetPath"
     
-    # Trim leading slash from suffix
     $suffixClean = if ($suffix) { $suffix.TrimStart("/") } else { "" }
     
     if ($netState -eq "LAN Network (Public)") {
@@ -123,6 +122,17 @@ function Verify-NodeInstalled {
     return $true
 }
 
+function Get-NpxOnlineFlag {
+    try {
+        $ip = [System.Net.Dns]::GetHostAddresses("registry.npmjs.org")
+        if ($ip) {
+            return "--prefer-offline"
+        }
+    } catch {}
+    Write-Host "[!] Offline mode: npm registry is unreachable. Forcing offline cache use." -ForegroundColor Yellow
+    return "--offline"
+}
+
 # --- DOWNLOADER & EXTRACTOR HELPERS ---
 
 function Download-File {
@@ -137,7 +147,6 @@ function Download-File {
         New-Item -ItemType Directory -Path $parentDir -Force | Out-Null
     }
     
-    # Try using BITS first (fast, native progress bar)
     try {
         Start-BitsTransfer -Source $url -Destination $destination -ErrorAction Stop
         Write-Host "[+] Download completed using BITS Transfer." -ForegroundColor Green
@@ -146,7 +155,6 @@ function Download-File {
         Write-Host "[*] BITS Transfer not available. Falling back to Invoke-WebRequest..." -ForegroundColor Yellow
     }
     
-    # Fallback to Invoke-WebRequest with progress preference enabled for visual feedback
     $oldProgress = $ProgressPreference
     $ProgressPreference = 'Continue'
     try {
@@ -170,7 +178,6 @@ function Extract-Zip {
         New-Item -ItemType Directory -Path $destinationPath -Force | Out-Null
     }
     
-    # Try using Windows native tar.exe first (takes seconds)
     try {
         if (Get-Command "tar.exe" -ErrorAction SilentlyContinue) {
             Write-Host "[*] Extracting with tar.exe (fast)..." -ForegroundColor DarkGray
@@ -184,7 +191,6 @@ function Extract-Zip {
         Write-Host "[*] tar.exe failed. Falling back to native Expand-Archive..." -ForegroundColor Yellow
     }
     
-    # Fallback to slower Expand-Archive
     try {
         Expand-Archive -Path $zipPath -DestinationPath $destinationPath -Force
         Write-Host "[+] Extraction complete (Expand-Archive)." -ForegroundColor Green
@@ -260,11 +266,16 @@ function Create-Database {
     
     $sqlCmd = "CREATE DATABASE IF NOT EXISTS ``$dbName`` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
     
-    $output = $null
-    if ([string]::IsNullOrEmpty($password)) {
-        $output = & $mysqlExe -u root -P $port -h 127.0.0.1 -e $sqlCmd 2>&1
+    # Securely bind password in environment to handle special characters cleanly and safely
+    $oldPassword = $env:MYSQL_PWD
+    $env:MYSQL_PWD = $password
+    
+    $output = & $mysqlExe -u root -P $port -h 127.0.0.1 -e $sqlCmd 2>&1
+    
+    if ($null -ne $oldPassword) {
+        $env:MYSQL_PWD = $oldPassword
     } else {
-        $output = & $mysqlExe -u root "-p$password" -P $port -h 127.0.0.1 -e $sqlCmd 2>&1
+        Remove-Item Env:\MYSQL_PWD -ErrorAction SilentlyContinue
     }
     
     if ($LASTEXITCODE -eq 0) {
@@ -296,7 +307,6 @@ function Configure-WordPress {
         return
     }
     
-    # Fetch salts from WordPress API
     $salts = $null
     try {
         Write-Host "Fetching secure security salts from api.wordpress.org..." -ForegroundColor Yellow
@@ -307,19 +317,16 @@ function Configure-WordPress {
     
     $content = Get-Content $sampleConfig -Raw
     
-    # Escape DB credentials for single-quoted PHP strings
     $escDbName = $dbName.Replace('\', '\\').Replace("'", "\'")
     $escDbUser = $dbUser.Replace('\', '\\').Replace("'", "\'")
     $escDbPassword = $dbPassword.Replace('\', '\\').Replace("'", "\'")
     $escDbHost = $dbHost.Replace('\', '\\').Replace("'", "\'")
     
-    # Replace DB credentials literally
     $content = $content.Replace("database_name_here", $escDbName)
     $content = $content.Replace("username_here", $escDbUser)
     $content = $content.Replace("password_here", $escDbPassword)
     $content = $content.Replace("localhost", $escDbHost)
     
-    # Replace salts
     if ($salts) {
         $pattern = '(?s)define\(\s*''AUTH_KEY''.*?define\(\s*''NONCE_SALT''.*?\);\s*'
         $content = $content -replace $pattern, $salts.Replace('$', '$$')
@@ -359,24 +366,34 @@ function Configure-Laravel {
         }
     }
     
-    $content = Get-Content $envPath -Raw
+    # Safely wrap environment variables containing spaces, hashes, or quotes in double quotes
+    function Sanitize-EnvValue {
+        param ([string]$value)
+        if ($null -eq $value) { return "" }
+        if ($value -match '[\s#''"$\\]') {
+            $escaped = $value.Replace('\', '\\').Replace('"', '\"').Replace('$', '\$')
+            return '"' + $escaped + '"'
+        }
+        return $value
+    }
     
-    # Escape credentials for regex replacement
-    $escDbHost = $dbHost.Replace('$', '$$')
-    $escDbPort = $dbPort.Replace('$', '$$')
-    $escDbName = $dbName.Replace('$', '$$')
-    $escDbUser = $dbUser.Replace('$', '$$')
-    $escDbPassword = $dbPassword.Replace('$', '$$')
+    $sanDbHost = Sanitize-EnvValue $dbHost
+    $sanDbPort = Sanitize-EnvValue $dbPort
+    $sanDbName = Sanitize-EnvValue $dbName
+    $sanDbUser = Sanitize-EnvValue $dbUser
+    $sanDbPassword = Sanitize-EnvValue $dbPassword
     
-    # Replace DB configurations (supports commented-out lines in newer Laravel versions)
-    $content = $content -replace '(?m)^#?\s*DB_CONNECTION=.*$', "DB_CONNECTION=mysql"
-    $content = $content -replace '(?m)^#?\s*DB_HOST=.*$', "DB_HOST=$escDbHost"
-    $content = $content -replace '(?m)^#?\s*DB_PORT=.*$', "DB_PORT=$escDbPort"
-    $content = $content -replace '(?m)^#?\s*DB_DATABASE=.*$', "DB_DATABASE=$escDbName"
-    $content = $content -replace '(?m)^#?\s*DB_USERNAME=.*$', "DB_USERNAME=$escDbUser"
-    $content = $content -replace '(?m)^#?\s*DB_PASSWORD=.*$', "DB_PASSWORD=$escDbPassword"
-    
-    $content | Set-Content $envPath -Force
+    $lines = Get-Content $envPath
+    $updatedLines = foreach ($line in $lines) {
+        if ($line -match '^\s*#?\s*DB_CONNECTION=') { "DB_CONNECTION=mysql" }
+        elseif ($line -match '^\s*#?\s*DB_HOST=') { "DB_HOST=$sanDbHost" }
+        elseif ($line -match '^\s*#?\s*DB_PORT=') { "DB_PORT=$sanDbPort" }
+        elseif ($line -match '^\s*#?\s*DB_DATABASE=') { "DB_DATABASE=$sanDbName" }
+        elseif ($line -match '^\s*#?\s*DB_USERNAME=') { "DB_USERNAME=$sanDbUser" }
+        elseif ($line -match '^\s*#?\s*DB_PASSWORD=') { "DB_PASSWORD=$sanDbPassword" }
+        else { $line }
+    }
+    $updatedLines | Set-Content $envPath -Force
     Write-Host "[+] Laravel .env file updated." -ForegroundColor Green
     
     Write-Host "Generating Laravel application key..." -ForegroundColor Yellow
@@ -414,7 +431,6 @@ function Configure-XenForo {
     }
     $configPath = Join-Path $srcDir "config.php"
     
-    # Escape for single-quoted PHP strings
     $phpDbHost = $dbHost.Replace('\', '\\').Replace("'", "\'")
     $phpDbPort = $dbPort.Replace('\', '\\').Replace("'", "\'")
     $phpDbUser = $dbUser.Replace('\', '\\').Replace("'", "\'")
@@ -450,20 +466,17 @@ function Get-InstallationPath {
             continue
         }
         
-        # Format separators and trim
         $targetInput = $targetInput.Replace("/", "\").Trim("\")
         
         $targetPath = Join-Path "$BaseDir\www" $targetInput
         $resolvedPath = [System.IO.Path]::GetFullPath($targetPath)
         $wwwPath = [System.IO.Path]::GetFullPath("$BaseDir\www")
         
-        # Directory traversal prevention check
         if (-not $resolvedPath.StartsWith($wwwPath, [System.StringComparison]::OrdinalIgnoreCase)) {
             Write-Host "[!] Security Warning: Installation must remain inside the www folder!" -ForegroundColor Red
             continue
         }
         
-        # Check if already exists
         if (Test-Path $resolvedPath) {
             Write-Host "[!] Warning: Directory '$resolvedPath' already exists." -ForegroundColor Yellow
             $overwrite = Read-Host "Do you want to overwrite it? ALL existing files in it will be deleted! (Y/N)"
@@ -484,55 +497,82 @@ function Get-InstallationPath {
 function Start-Installer {
     if (-not (Verify-StackInstalled)) { return }
     
-    # Run PHP optimization on start to suppress deprecations
     Optimize-PHPConfiguration
     
     $ports = Get-Ports
     $tempDir = "$BaseDir\temp_installer"
     
+    # 1. Discover all modular installer scripts in the scripts_installer subdirectory
+    $modulesDir = Join-Path $BaseDir "scripts_installer"
+    $services = @()
+    if (Test-Path $modulesDir) {
+        $files = Get-ChildItem -Path $modulesDir -Filter *.ps1 -File
+        foreach ($file in $files) {
+            try {
+                $def = $null # Reset to prevent variable pollution from previous iteration
+                $def = . $file.FullName
+                if ($def -is [hashtable] -and $def.Name -and $def.Install -is [scriptblock]) {
+                    $def.FilePath = $file.FullName
+                    if ($null -eq $def.Order) { $def.Order = 99 }
+                    if ($null -eq $def.DbRequired) { $def.DbRequired = $true }
+                    $services += $def
+                }
+            } catch {
+                Write-Host "[!] Warning: Failed to load module from $($file.Name): $_" -ForegroundColor Yellow
+            }
+        }
+    }
+    
+    # Sort services by Order
+    $services = $services | Sort-Object { $_.Order }
+    
+    if ($services.Length -eq 0) {
+        Write-Host "[!] Error: No installer modules discovered in '$modulesDir'!" -ForegroundColor Red
+        Read-Host "Press Enter to exit..."
+        return
+    }
+    
     :MainLoop while ($true) {
         Clear-Host
         Write-Host "====================================================================" -ForegroundColor Cyan
-        Write-Host " OFFLINE PORTABLE WAMP - PROFESSIONAL SCRIPTS INSTALLER" -ForegroundColor Cyan
+        Write-Host " OFFLINE PORTABLE WAMP - DYNAMIC SCRIPTS INSTALLER" -ForegroundColor Cyan
         Write-Host "====================================================================" -ForegroundColor Cyan
         Write-Host " Select a script/framework to download and configure:"
         Write-Host "--------------------------------------------------------------------"
-        Write-Host " 1. WordPress (Latest release)"
-        Write-Host " 2. Joomla (Joomla 5.2.2 stable package)"
-        Write-Host " 3. Laravel Framework (Automated project setup via Composer)"
-        Write-Host " 4. XenForo Forums (Requires your own local xenforo.zip package)"
-        Write-Host " 5. Drupal CMS (Drupal 10.3.0 stable release)"
-        Write-Host " 6. React.js App (Fast setup via Vite + NPM)"
-        Write-Host " 7. Next.js App (Production-ready via create-next-app + Tailwind)"
-        Write-Host " 8. Vue.js App (Fast setup via Vite + NPM)"
-        Write-Host " 9. PrestaShop (PrestaShop 8.1.7 stable)"
-        Write-Host " 10. Exit"
+        
+        $index = 1
+        foreach ($svc in $services) {
+            Write-Host (" {0,2}. {1}" -f $index, $svc.Name)
+            $index++
+        }
+        Write-Host (" {0,2}. Exit" -f $index)
         Write-Host "====================================================================" -ForegroundColor Cyan
         
-        $choice = Read-Host "Select an option (1-10)"
+        $exitChoice = $index
+        $choice = Read-Host "Select an option (1-$exitChoice)"
         if ($null -ne $choice) { $choice = $choice.Trim() }
         
-        if ($choice -eq "10" -or [string]::IsNullOrEmpty($choice)) {
-            # Clean up temp installer folder if exists
+        if ($choice -eq "$exitChoice" -or [string]::IsNullOrEmpty($choice)) {
             if (Test-Path $tempDir) { Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue }
             Write-Host "Exiting Scripts Installer." -ForegroundColor Green
             Start-Sleep -Seconds 1
             break
         }
         
-        if ($choice -notmatch "^(?:[1-9]|10)$") {
-            Write-Host "[!] Invalid option. Choose 1-10." -ForegroundColor Red
+        if ($choice -notmatch "^\d+$" -or [int]$choice -lt 1 -or [int]$choice -gt $exitChoice) {
+            Write-Host "[!] Invalid option. Choose 1-$exitChoice." -ForegroundColor Red
             Start-Sleep -Seconds 2
             continue
         }
+        
+        $selectedSvc = $services[[int]$choice - 1]
         
         # Get target paths
         $folderInfo = Get-InstallationPath
         $targetPath = $folderInfo.Path
         $relFolder = $folderInfo.RelFolder
         
-        # Database setup prompts (only for PHP/CMS scripts: WordPress, Joomla, Laravel, Xenforo, Drupal, PrestaShop)
-        $isNodeApp = $choice -match "^[6-8]$"
+        # Database setup prompts
         $configureDb = "N"
         $createDb = "N"
         $dbName = ""
@@ -540,21 +580,30 @@ function Start-Installer {
         $dbPassword = "root"
         $installDeps = "Y"
         
-        if (-not $isNodeApp) {
+        if ($selectedSvc.DbRequired) {
             $configChoice = Read-Host "Do you want to configure database settings? (Y/N) [default: Y]"
             $configureDb = if ([string]::IsNullOrEmpty($configChoice)) { "Y" } else { $configChoice.Trim().ToUpper() }
             
             if ($configureDb -eq "Y") {
-                # Determine default database name
                 $defaultDbName = "db_" + ($relFolder -replace '[^a-zA-Z0-9]', '_').Trim('_')
                 Write-Host "Enter database name [default: $defaultDbName]:"
                 $dbNameInput = Read-Host "DB Name"
                 $dbName = if ([string]::IsNullOrEmpty($dbNameInput)) { $defaultDbName } else { $dbNameInput.Trim() }
                 
+                # Sanitize database name: replace non-alphanumeric with underscores and clean up
+                $dbName = ($dbName -replace '[^a-zA-Z0-9]', '_') -replace '_+', '_'
+                $dbName = $dbName.Trim('_')
+                if ([string]::IsNullOrEmpty($dbName)) { $dbName = $defaultDbName }
+                
                 Write-Host "Enter MySQL root username [default: root]:"
                 $userInput = Read-Host "DB User"
                 $dbUser = if ([string]::IsNullOrEmpty($userInput)) { "root" } else { $userInput.Trim() }
-
+                
+                # Sanitize database username
+                $dbUser = ($dbUser -replace '[^a-zA-Z0-9]', '_') -replace '_+', '_'
+                $dbUser = $dbUser.Trim('_')
+                if ([string]::IsNullOrEmpty($dbUser)) { $dbUser = "root" }
+ 
                 Write-Host "Enter MySQL root password [default: root]:"
                 $passInput = Read-Host "Password"
                 $dbPassword = if ([string]::IsNullOrEmpty($passInput)) { "root" } else { $passInput }
@@ -590,221 +639,15 @@ function Start-Installer {
         New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
         
         try {
-            switch ($choice) {
-                "1" {
-                    # WordPress
-                    $zipPath = "$tempDir\wordpress.zip"
-                    Download-File "https://wordpress.org/latest.zip" $zipPath
-                    Extract-Zip $zipPath $targetPath
-                    Flatten-Subfolder $targetPath "wordpress"
-                    
-                    if ($configureDb -eq "Y") {
-                        Configure-WordPress $targetPath $dbName $dbUser $dbPassword "127.0.0.1:$($ports.MySQL)"
-                    }
-                    
-                    Print-SuccessMessage "WordPress" $targetPath $relFolder "" $dbName $dbPassword
-                }
-                
-                "2" {
-                    # Joomla
-                    $zipPath = "$tempDir\joomla.zip"
-                    Download-File "https://github.com/joomla/joomla-cms/releases/download/5.2.2/Joomla_5.2.2-Stable-Full_Package.zip" $zipPath
-                    Extract-Zip $zipPath $targetPath
-                    
-                    Print-SuccessMessage "Joomla" $targetPath $relFolder "" $dbName $dbPassword
-                }
-                
-                "3" {
-                    # Laravel
-                    $composerPhar = "$BaseDir\composer.phar"
-                    if (-not (Test-Path $composerPhar)) {
-                        Write-Host "Composer is required for Laravel. Downloading composer.phar..." -ForegroundColor Yellow
-                        Download-File "https://getcomposer.org/composer.phar" $composerPhar
-                    }
-                    
-                    Write-Host "Creating Laravel project. This takes a few minutes..." -ForegroundColor Yellow
-                    $phpExe = "$BaseDir\php\php.exe"
-                    if (-not (Test-Path $phpExe)) {
-                        throw "php.exe not found under $BaseDir\php. Cannot run Composer."
-                    }
-                    
-                    & $phpExe $composerPhar create-project laravel/laravel $targetPath --prefer-dist --no-interaction
-                    if ($LASTEXITCODE -ne 0) {
-                        throw "Composer project creation failed with exit code $LASTEXITCODE."
-                    }
-                    
-                    if ($configureDb -eq "Y") {
-                        Configure-Laravel $targetPath $dbName $dbUser $dbPassword "127.0.0.1" $ports.MySQL
-                    }
-                    
-                    Print-SuccessMessage "Laravel" $targetPath $relFolder "public" $dbName $dbPassword
-                }
-                
-                "4" {
-                    # XenForo
-                    Write-Host "XenForo is a commercial product. Please provide the zip archive." -ForegroundColor Yellow
-                    Write-Host "Place your 'xenforo.zip' in: $BaseDir" -ForegroundColor DarkGray
-                    
-                    $zipPath = Read-Host "Enter path to xenforo.zip [default: $BaseDir\xenforo.zip]"
-                    if ([string]::IsNullOrEmpty($zipPath)) { $zipPath = "$BaseDir\xenforo.zip" }
-                    
-                    if (-not (Test-Path $zipPath)) {
-                        Write-Host "[!] Error: XenForo zip archive not found at '$zipPath'!" -ForegroundColor Red
-                        Read-Host "Press Enter to return..."
-                        continue
-                    }
-                    
-                    Extract-Zip $zipPath $targetPath
-                    
-                    # Flatten 'upload' subfolder if exists
-                    if (Test-Path (Join-Path $targetPath "upload")) {
-                        Flatten-Subfolder $targetPath "upload"
-                    } else {
-                        Flatten-Subfolder $targetPath
-                    }
-                    
-                    if ($configureDb -eq "Y") {
-                        Configure-XenForo $targetPath $dbName $dbUser $dbPassword "127.0.0.1" $ports.MySQL
-                    }
-                    
-                    Print-SuccessMessage "XenForo" $targetPath $relFolder "install" $dbName $dbPassword
-                }
-                
-                "5" {
-                    # Drupal
-                    $zipPath = "$tempDir\drupal.zip"
-                    Download-File "https://ftp.drupal.org/files/projects/drupal-10.3.0.zip" $zipPath
-                    Extract-Zip $zipPath $targetPath
-                    Flatten-Subfolder $targetPath
-                    
-                    Print-SuccessMessage "Drupal" $targetPath $relFolder "" $dbName $dbPassword
-                }
-                
-                "6" {
-                    # React.js
-                    if (-not (Verify-NodeInstalled)) { continue }
-                    
-                    Write-Host "Creating React.js project using Vite... This may take a moment." -ForegroundColor Yellow
-                    cmd.exe /c "npx -y create-vite@latest `"$targetPath`" --template react"
-                    if ($LASTEXITCODE -ne 0) {
-                        throw "Vite React creation failed with exit code $LASTEXITCODE."
-                    }
-                    
-                    if ($installDeps -eq "Y") {
-                        Write-Host "Installing NPM dependencies... This may take a minute." -ForegroundColor Yellow
-                        Push-Location $targetPath
-                        try {
-                            cmd.exe /c "npm install"
-                            if ($LASTEXITCODE -ne 0) {
-                                Write-Host "[-] Warning: npm install failed. You may need to run 'npm install' manually inside the folder." -ForegroundColor Red
-                            }
-                        } finally {
-                            Pop-Location
-                        }
-                    } else {
-                        Write-Host "[*] Skipping NPM dependencies installation. Run 'npm install' manually inside the project directory later." -ForegroundColor Yellow
-                    }
-                    
-                    Write-Host "`n====================================================================" -ForegroundColor Green
-                    Write-Host " [+] React.js Project created successfully!" -ForegroundColor Green
-                    Write-Host "--------------------------------------------------------------------"
-                    Write-Host " Target Folder:  $targetPath"
-                    Write-Host " Next Steps:     cd $relFolder"
-                    if ($installDeps -ne "Y") {
-                        Write-Host "                 npm install" -ForegroundColor Yellow
-                    }
-                    Write-Host "                 npm run dev"
-                    Write-Host "                 (To run on network: npm run dev -- --host)" -ForegroundColor Cyan
-                    Write-Host "====================================================================" -ForegroundColor Green
-                }
-                
-                "7" {
-                    # Next.js
-                    if (-not (Verify-NodeInstalled)) { continue }
-                    
-                    Write-Host "Creating Next.js project... This takes a few minutes." -ForegroundColor Yellow
-                    $extraArgs = if ($installDeps -ne "Y") { "--skip-install" } else { "" }
-                    cmd.exe /c "npx -y create-next-app@latest `"$targetPath`" --ts --tailwind --eslint --app --src-dir --import-alias `"`@/*`"` --use-npm --no-git $extraArgs"
-                    if ($LASTEXITCODE -ne 0) {
-                        throw "Next.js creation failed with exit code $LASTEXITCODE."
-                    }
-                    
-                    Write-Host "`n====================================================================" -ForegroundColor Green
-                    Write-Host " [+] Next.js Project created successfully!" -ForegroundColor Green
-                    Write-Host "--------------------------------------------------------------------"
-                    Write-Host " Target Folder:  $targetPath"
-                    Write-Host " Next Steps:     cd $relFolder"
-                    if ($installDeps -ne "Y") {
-                        Write-Host "                 npm install" -ForegroundColor Yellow
-                    }
-                    Write-Host "                 npm run dev"
-                    Write-Host "                 (To run on network: npm run dev -- --host)" -ForegroundColor Cyan
-                    Write-Host "====================================================================" -ForegroundColor Green
-                }
-                
-                "8" {
-                    # Vue.js
-                    if (-not (Verify-NodeInstalled)) { continue }
-                    
-                    Write-Host "Creating Vue.js project using Vite... This may take a moment." -ForegroundColor Yellow
-                    cmd.exe /c "npx -y create-vite@latest `"$targetPath`" --template vue"
-                    if ($LASTEXITCODE -ne 0) {
-                        throw "Vite Vue creation failed with exit code $LASTEXITCODE."
-                    }
-                    
-                    if ($installDeps -eq "Y") {
-                        Write-Host "Installing NPM dependencies... This may take a minute." -ForegroundColor Yellow
-                        Push-Location $targetPath
-                        try {
-                            cmd.exe /c "npm install"
-                            if ($LASTEXITCODE -ne 0) {
-                                Write-Host "[-] Warning: npm install failed. You may need to run 'npm install' manually inside the folder." -ForegroundColor Red
-                            }
-                        } finally {
-                            Pop-Location
-                        }
-                    } else {
-                        Write-Host "[*] Skipping NPM dependencies installation. Run 'npm install' manually inside the project directory later." -ForegroundColor Yellow
-                    }
-                    
-                    Write-Host "`n====================================================================" -ForegroundColor Green
-                    Write-Host " [+] Vue.js Project created successfully!" -ForegroundColor Green
-                    Write-Host "--------------------------------------------------------------------"
-                    Write-Host " Target Folder:  $targetPath"
-                    Write-Host " Next Steps:     cd $relFolder"
-                    if ($installDeps -ne "Y") {
-                        Write-Host "                 npm install" -ForegroundColor Yellow
-                    }
-                    Write-Host "                 npm run dev"
-                    Write-Host "                 (To run on network: npm run dev -- --host)" -ForegroundColor Cyan
-                    Write-Host "====================================================================" -ForegroundColor Green
-                }
-                
-                "9" {
-                    # PrestaShop
-                    $zipPath = "$tempDir\prestashop.zip"
-                    Download-File "https://github.com/PrestaShop/PrestaShop/releases/download/8.1.7/prestashop_8.1.7.zip" $zipPath
-                    Extract-Zip $zipPath $targetPath
-                    
-                    # PrestaShop zip sometimes contains an inner index.php and a prestashop.zip file inside it!
-                    $innerZip = Join-Path $targetPath "prestashop.zip"
-                    if (Test-Path $innerZip) {
-                        Write-Host "Extracting inner PrestaShop package..." -ForegroundColor Yellow
-                        Extract-Zip $innerZip $targetPath
-                        Remove-Item $innerZip -Force
-                        # Clean up other installer files
-                        Remove-Item (Join-Path $targetPath "index.php") -Force -ErrorAction SilentlyContinue
-                        Remove-Item (Join-Path $targetPath "Install_PrestaShop.html") -Force -ErrorAction SilentlyContinue
-                    }
-                    
-                    Print-SuccessMessage "PrestaShop" $targetPath $relFolder "" $dbName $dbPassword
-                }
-            }
+            # Execute the modular script block
+            & $selectedSvc.Install $targetPath $tempDir $dbName $dbUser $dbPassword "127.0.0.1" $ports.MySQL $installDeps
+            
+            # Print success info
+            Print-SuccessMessage $selectedSvc.Name $targetPath $relFolder $selectedSvc.Suffix $dbName $dbPassword
         } catch {
             Write-Host "[!] An error occurred during installation: $_" -ForegroundColor Red
         }
         
-        # Clean up temp folder
         if (Test-Path $tempDir) { Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue }
         Read-Host "Press Enter to return to main installer menu..."
     }
